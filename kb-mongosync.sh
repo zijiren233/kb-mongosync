@@ -680,10 +680,10 @@ sys.exit(0 if ok else 1)' || die "verify failed"
   info "verify passed"
 }
 
-oplog_user_ts() { # ns pod comp -> epoch ms of the last non-noop oplog entry
+oplog_user_ts() { # ns pod comp -> stable string for the last non-noop oplog entry
   mongosh_js "$1" "$2" "$3" '
     const e = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(1).toArray()[0];
-    print(e ? e.ts.getTime() : 0)'
+    print(e ? e.ts.toString() : "none")'
 }
 
 cmd_commit() {
@@ -726,7 +726,13 @@ cmd_commit() {
   if [ -n "$gns" ] && [ -n "$gcl" ]; then
     src_comp="${KBMS_SOURCE_COMPONENT:-$(discover_component "$gns" "$gcl")}"
     sp="$(find_primary_pod "$gns" "$gcl" "$src_comp" || true)"
-    if [ -n "$sp" ]; then
+    if [ -z "$sp" ]; then
+      if [ "$FORCE" -eq 1 ]; then
+        warn "cannot reach the source cluster to verify quiescence; --force given"
+      else
+        die "cannot reach the source cluster to verify quiescence (no primary pod); run commit from the laptop or use --force"
+      fi
+    else
       ts1="$(oplog_user_ts "$gns" "$sp" "$src_comp")"
       sleep 8
       ts2="$(oplog_user_ts "$gns" "$sp" "$src_comp")"

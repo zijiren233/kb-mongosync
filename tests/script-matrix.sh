@@ -134,6 +134,11 @@ run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m13 manual mode: nonze
 [ -s "$TMP/posts" ] && bad "m13 no commit POST issued" || ok "m13 no commit POST issued"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":20}'
 run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes --force; rc_is 0 "m12 --force overrides quiet gate"; has "manual mode" "m12 warns about manual mode"; has "COMMITTED" "m12 committed"
+mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":0}'
+: >"$TMP/posts"
+run env -u KUBECONFIG KBMS_SOURCE_NAMESPACE=no-such-ns KBMS_SOURCE_CLUSTER=x "$S" "${API[@]}" commit --yes
+rc_is 1 "m14 unreachable source fails closed (no silent skip)"; has "not found or access denied|cannot reach" "m14 message"
+[ -s "$TMP/posts" ] && bad "m14 no commit POST issued" || ok "m14 no commit POST issued"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null; MOCK_PID=""
 
 printf '\nscript-matrix: %d passed, %d failed\n' "$PASS" "$FAIL"

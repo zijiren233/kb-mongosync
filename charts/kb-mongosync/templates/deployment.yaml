@@ -50,6 +50,8 @@ spec:
             capabilities:
               drop: ["ALL"]
           env:
+            - name: KUBECONFIG
+              value: /tmp/.kube/config
             - name: KBMS_API_URL
               value: "http://127.0.0.1:{{ .Values.port }}"
             - name: KBMS_VERBOSITY
