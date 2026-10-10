@@ -67,7 +67,7 @@ CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd
 
 ## Commit semantics
 
-- `commit` requires a quiet source: lag samples at or under one noop-write period, plus (auto mode) an oplog check proving no user writes are landing. mongosync 1.16 fatals if a write races its final verification, leaving the sync stalled and the source unblocked. `--force` overrides.
+- Stop source writers BEFORE running `commit`; the quiet gate (lag samples plus an oplog quiescence check in auto mode) is a backstop, not a probe — mongosync 1.16 is unstable when its API or commit path is exercised while writes land, and a mid-sync death requires recreating the destination. `--force` overrides the gate.
 - After `COMMITTED` the destination is writable and the source stays blocked until `unblock`.
 - Commit is final; reverse is only possible before commit.
 
