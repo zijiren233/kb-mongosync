@@ -41,7 +41,8 @@ jobs:
           MSVER: ${{ steps.msver.outputs.version }}
         run: |
           set -eux
-          for art in ubuntu2204-x86_64 ubuntu2204-arm64; do
+          # amd64 ships an ubuntu2204 build; arm64 only ships an Amazon 2023 build
+          for art in ubuntu2204-x86_64 amazon2023-arm64-arm64; do
             url="https://fastdl.mongodb.org/tools/mongosync/mongosync-${art}-${MSVER}.tgz"
             code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -r 0-0 "$url" || echo 000)"
             [ "$code" = "206" ] || [ "$code" = "200" ] || {
