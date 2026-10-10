@@ -148,26 +148,24 @@ case "$SUBCMD" in
     fi
     ;;
 esac
-[ -n "$RELEASE" ] || RELEASE="$([ "${MODE:-}" = auto ] && printf 'msync-%s-to-%s' "$SRC_CLUSTER" "$DST_CLUSTER" || echo msync-manual)"
-case "$SUBCMD" in
-  deploy|teardown|run)
-    if [ -z "$NAMESPACE" ]; then
-      [ "${MODE:-}" = auto ] && NAMESPACE="$SRC_NS" || die "manual mode needs --namespace"
-    fi
-    ;;
-esac
+if [ -z "$RELEASE" ]; then
+  if [ -n "$SRC_CLUSTER" ] && [ -n "$DST_CLUSTER" ]; then
+    RELEASE="msync-${SRC_CLUSTER}-to-${DST_CLUSTER}"
+  else
+    RELEASE="msync-manual"
+  fi
+fi
+[ -n "$NAMESPACE" ] || NAMESPACE="$SRC_NS"
 
 case "$SUBCMD" in
   deploy|teardown) command -v helm >/dev/null 2>&1 || die "missing dependency: helm" ;;
 esac
 if [ "${MODE:-}" = auto ]; then
   command -v kubectl >/dev/null 2>&1 || die "missing dependency: kubectl"
-  if [ -n "${KUBECONFIG:-}" ] && [ "$KCFG_GIVEN" -ne 1 ]; then
-    : # in-pod or caller-provided environment
-  else
-    [ -f "$KCTL_CFG" ] || die "kubeconfig not found: $KCTL_CFG"
-    export KUBECONFIG="$KCTL_CFG"
-  fi
+fi
+if [ "$KCFG_GIVEN" -eq 1 ] || [ -z "${KUBECONFIG:-}" ]; then
+  [ -f "$KCTL_CFG" ] || die "kubeconfig not found: $KCTL_CFG"
+  export KUBECONFIG="$KCTL_CFG"
 fi
 
 kc() { kubectl "$@"; }
@@ -285,6 +283,7 @@ pf_up() {
   if [ -n "$API_URL" ]; then API_BASE="$API_URL"; return 0; fi
   if [ -n "${KBMS_API_URL:-}" ]; then API_BASE="$KBMS_API_URL"; return 0; fi
   command -v kubectl >/dev/null 2>&1 || die "no kubectl and no --api-url; cannot reach the API"
+  [ -n "$NAMESPACE" ] || die "need --namespace (or --api-url) to locate the release"
   local pod p tried=0 i
   pod="$(release_pod)"
   [ -n "$pod" ] || die "no pod found for release $NAMESPACE/$RELEASE (run deploy first)"
