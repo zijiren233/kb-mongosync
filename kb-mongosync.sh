@@ -37,6 +37,7 @@ for _c in curl python3; do
 done
 
 KCTL_CFG="${KUBECONFIG:-$HOME/.kube/config}"
+KCTX=""
 SRC_URI=""
 DST_URI=""
 SRC_NS="";  SRC_CLUSTER=""
@@ -70,6 +71,7 @@ Input mode (choose one):
 
 Options:
   --kubeconfig PATH       kubeconfig for kubectl/helm (default $KUBECONFIG)
+  --context NAME          context to select from the kubeconfig
   --namespace NS          release namespace (default: source namespace in auto mode)
   --release NAME          helm release name (default msync-<src>-to-<dst>, or msync-manual)
   --chart URI             chart reference (default oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync)
@@ -104,9 +106,24 @@ EOF
 
 need_value() { [ $# -ge 2 ] || die "option $1 requires a value"; }
 
+validate_uri() { # flag-name value; catches the misconfigurations that would
+                 # otherwise surface only as a crashlooping mongosync pod
+  local name="$1" val="$2"
+  case "$val" in
+    mongodb://*|mongodb+srv://*) : ;;
+    *) die "$name must start with mongodb:// (got: ${val%%@*}@...)" ;;
+  esac
+  printf '%s' "$val" | LC_ALL=C grep -qE '^[[:print:]]+$' \
+    || die "$name contains non-printable characters"
+  printf '%s' "$val" | grep -qE '[[:space:]]' \
+    && die "$name contains whitespace"
+  return 0
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --kubeconfig)    need_value "$@"; KCTL_CFG="$2"; KCFG_GIVEN=1; shift 2 ;;
+    --context)       need_value "$@"; KCTX="$2"; shift 2 ;;
     --source-uri)    need_value "$@"; SRC_URI="$2"; shift 2 ;;
     --destination-uri) need_value "$@"; DST_URI="$2"; shift 2 ;;
     --src-ns)        need_value "$@"; SRC_NS="$2"; shift 2 ;;
@@ -139,6 +156,8 @@ case "$SUBCMD" in
   check|deploy|verify|unblock|rbac|run)
     if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
       [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
+      validate_uri --source-uri "$SRC_URI"
+      validate_uri --destination-uri "$DST_URI"
       MODE=manual
     else
       [ -n "$SRC_NS" ]     || die "missing --src-ns (or use --source-uri manual mode)"
@@ -169,6 +188,11 @@ if [ "${KCFG_GIVEN:-0}" -eq 1 ]; then
   export KUBECONFIG="$KCTL_CFG"
 elif [ -z "${KUBECONFIG:-}" ] && [ -f "$KCTL_CFG" ]; then
   export KUBECONFIG="$KCTL_CFG"
+fi
+if [ -n "$KCTX" ]; then
+  kubectl config view --raw --minify --context="$KCTX" >"$KB_TMP/context.cfg" 2>/dev/null \
+    || die "context not found in kubeconfig: $KCTX"
+  export KUBECONFIG="$KB_TMP/context.cfg"
 fi
 
 kc() { kubectl "$@"; }
@@ -348,7 +372,7 @@ chart_ref() {
 
 cmd_check() {
   [ "$MODE" = auto ] || die "check requires auto mode (manual mode: verify your URIs yourself)"
-  local fail=0 src_comp dst_comp src_phase dst_phase src_ver dst_ver dbs dst_primary
+  local fail=0 src_comp dst_comp src_phase dst_phase src_ver dst_ver dbs dst_primary src_primary meta out
   src_phase="$(cluster_phase "$SRC_NS" "$SRC_CLUSTER")"
   dst_phase="$(cluster_phase "$DST_NS" "$DST_CLUSTER")"
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
@@ -383,19 +407,56 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
   esac
   info "note: mongosync 1.17+ requires source >= 6.0.24; use 1.16.0 for older 6.0.x sources"
 
+  src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
+  if [ -z "$src_primary" ]; then
+    warn "no primary pod found on source cluster"
+    fail=1
+  else
+    out="$(mongosh_js "$SRC_NS" "$src_primary" "$src_comp" '
+      print(rs.conf().members.filter(function(m){return m.arbiterOnly}).length)')"
+    if [ "$out" = "0" ]; then
+      info "source: no arbiter members"
+    else
+      warn "source has $out arbiter member(s); mongosync refuses replica sets with arbiters"
+      fail=1
+    fi
+    out="$(mongosh_js "$SRC_NS" "$src_primary" "$src_comp" '
+      const bad=[];
+      for (const n of db.getMongo().getDBNames()) {
+        if (["admin","config","local"].includes(n)) continue;
+        const r=db.getSiblingDB(n).runCommand({listCollections:1, nameOnly:true, authorizedCollections:true});
+        for (const c of r.cursor.firstBatch)
+          if (c.type && c.type !== "collection") bad.push(n+"."+c.name+":"+c.type);
+      }
+      print(bad.join(","))')"
+    if [ -n "$out" ]; then
+      warn "non-plain collections on source (mongosync copies plain collections only): $out"
+      fail=1
+    else
+      info "source: plain collections only"
+    fi
+  fi
+
   dst_primary="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
   if [ -z "$dst_primary" ]; then
     warn "no primary pod found on destination cluster"
     fail=1
   else
-    dbs="$(mongosh_js "$DST_NS" "$dst_primary" "$dst_comp" '
-      print(db.getMongo().getDBNames().filter(n =>
-        !["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"].includes(n)).join(","))')"
+    out="$(mongosh_js "$DST_NS" "$dst_primary" "$dst_comp" '
+      const names=db.getMongo().getDBNames();
+      const skip=["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"];
+      print(names.filter(function(n){return !skip.includes(n)}).join(","));
+      print("meta:"+names.filter(function(n){return ["__mdb_internal_mongosync","mongosync_reserved_for_internal_use"].includes(n)}).join(","))')"
+    dbs="$(printf '%s\n' "$out" | sed -n 1p)"
+    meta="$(printf '%s\n' "$out" | sed -n 2p | cut -d: -f2-)"
     if [ -n "$dbs" ]; then
       warn "destination not empty (user dbs: $dbs); full sync requires an empty destination"
       fail=1
     else
       info "destination is empty"
+    fi
+    if [ -n "$meta" ]; then
+      info "destination holds leftover mongosync metadata ($meta): deploying again resumes that sync; for a fresh start drop it or recreate the destination"
     fi
   fi
 

@@ -70,3 +70,10 @@ CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd
 - `commit` write-blocks the source immediately; source writes fail during the short COMMITTING window.
 - After `COMMITTED` the destination is writable and the source stays blocked until `unblock`.
 - Commit is final; reverse is only possible before commit.
+
+## Recovery and scope
+
+- A restarted or redeployed sync (pod recycle, node drain, teardown + deploy) resumes from metadata stored on the destination; no re-copy.
+- To start over from scratch instead, recreate the destination cluster or drop its mongosync metadata databases (`mongosync_reserved_for_internal_use`, `__mdb_internal_mongosync`); `check` reports them.
+- Scope: replica-set clusters with SCRAM auth and no TLS. Not supported: sharded clusters, arbiters, timeseries collections and views (`check` rejects these), remote API exposure (mongosync binds localhost; use `kubectl exec` or port-forward).
+- On clusters with NetworkPolicies, the release pod must be allowed to reach both MongoDB clusters on 27017.

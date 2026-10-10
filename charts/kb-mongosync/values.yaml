@@ -28,6 +28,11 @@ serviceAccount:
 rbac:
   create: true
 
+imagePullSecrets: []
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
 verbosity: INFO
 port: 27180
 

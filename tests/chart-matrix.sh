@@ -104,6 +104,22 @@ echo "== c13-c14 lint =="
 if helm lint "$CHART" "${SA_MODE[@]}" >"$TMP/lint1" 2>&1; then ok "c13 lint sa mode"; else bad "c13 lint sa mode"; cat "$TMP/lint1"; fi
 if helm lint "$CHART" "${MANUAL[@]}" --set serviceAccount.create=false --set rbac.create=false >"$TMP/lint2" 2>&1; then ok "c14 lint manual mode"; else bad "c14 lint manual mode"; cat "$TMP/lint2"; fi
 
+echo "== c18-c22 hardening fields and uri validation =="
+render rel-ns "${SA_MODE[@]}" || { bad "c18 render"; }
+A "c18 pod securityContext (restricted PSA compatible)" 'grep -q "runAsNonRoot: true" "$TMP/out.yaml" && grep -q "runAsUser: 10001" "$TMP/out.yaml" && grep -q "type: RuntimeDefault" "$TMP/out.yaml"'
+A "c18 container securityContext" 'grep -q "allowPrivilegeEscalation: false" "$TMP/out.yaml" && grep -q "drop:" "$TMP/out.yaml"'
+AN "c18 no imagePullSecrets by default" 'grep -q "imagePullSecrets" "$TMP/out.yaml"'
+AN "c18 no nodeSelector by default" 'grep -q "nodeSelector" "$TMP/out.yaml"'
+render rel-ns "${SA_MODE[@]}" --set imagePullSecrets[0].name=regcred \
+  --set 'nodeSelector.kubernetes\.io/os=linux' --set tolerations[0].operator=Exists || { bad "c19 render"; }
+A "c19 imagePullSecrets rendered" 'grep -A2 "imagePullSecrets" "$TMP/out.yaml" | grep -q "name: regcred"'
+A "c19 nodeSelector rendered" 'grep -A2 "nodeSelector" "$TMP/out.yaml" | grep -q "kubernetes.io/os: linux"'
+A "c19 tolerations rendered" 'grep -A2 "tolerations" "$TMP/out.yaml" | grep -q "operator: Exists"'
+render rel-ns "${MANUAL[@]}" || { bad "c20 render"; }
+A "c20 hardening present in manual mode too" 'grep -q "runAsNonRoot: true" "$TMP/out.yaml"'
+AN "c21 bad uri scheme rejected" 'render rel-ns --set source.uri=foo://x --set destination.uri=mongodb://b'
+A "c21 error mentions scheme" 'grep -q "must start with mongodb://" "$TMP/err"'
+
 echo "== c15-c17 invalid configurations must fail =="
 AN "c15 one uri only rejected" 'render rel-ns --set source.uri=mongodb://a'
 A "c15 error mentions both uris" 'grep -q "needs both source.uri and destination.uri" "$TMP/err"'

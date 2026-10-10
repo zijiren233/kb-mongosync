@@ -6,7 +6,8 @@ set -u
 cd "$(dirname "$0")/.."
 S="$PWD/kb-mongosync.sh"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+MOCK_PID=""
+trap 'rm -rf "$TMP"; [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null' EXIT
 mkdir -p "$TMP/home/.kube" "$TMP/nokube"
 printf 'apiVersion: v1\nkind: Config\n' >"$TMP/home/.kube/config"
 DEAD_API=http://127.0.0.1:1
@@ -57,6 +58,73 @@ run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" verify;    rc_is 2 "t19 verify manual ga
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" unblock;   rc_is 2 "t20 unblock manual gate"; has "unblock needs auto mode" "t20 hint"
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" rbac;      rc_is 1 "t21 rbac manual gate"; has "rbac requires auto mode" "t21 message"
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" check;     rc_is 1 "t22 check manual gate"; has "check requires auto mode" "t22 message"
+
+echo "== uri and context validation =="
+run "${CLEAN[@]}" "$S" --source-uri foo://x --destination-uri mongodb://b deploy
+rc_is 1 "t23 uri scheme rejected"; has "must start with mongodb://" "t23 message"
+run "${CLEAN[@]}" "$S" --source-uri "mongodb://a b" --destination-uri mongodb://b deploy
+rc_is 1 "t24 uri whitespace rejected"; has "whitespace" "t24 message"
+run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" --context nope status
+rc_is 1 "t25 unknown context rejected"; has "context not found" "t25 message"
+
+echo "== api subcommands against a mock mongosync =="
+cat >"$TMP/mock.py" <<'PYEOF'
+import http.server, json, os
+STATE=os.environ["MOCK_STATE"]; POSTS=os.environ["MOCK_POSTS"]
+class H(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, obj):
+        b=json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type","application/json")
+        self.send_header("Content-Length",str(len(b)))
+        self.end_headers(); self.wfile.write(b)
+    def _state(self):
+        try:
+            with open(STATE) as f: return json.load(f)
+        except Exception: return {"state":"IDLE"}
+    def _save(self,d):
+        with open(STATE,"w") as f: json.dump(d,f)
+    def do_GET(self):
+        if self.path.startswith("/api/v1/progress"): self._send(200, {"progress": self._state()})
+        else: self._send(404, {"error":"not found"})
+    def do_POST(self):
+        n=int(self.headers.get("Content-Length",0)); body=self.rfile.read(n).decode()
+        with open(POSTS,"a") as f: f.write(self.path+" "+body+"\n")
+        if self.path=="/api/v1/start":
+            s=self._state(); s["state"]="RUNNING"; self._save(s)
+        elif self.path=="/api/v1/commit":
+            self._save({"state":"COMMITTED","canCommit":False,"canWrite":True,"lagTimeSeconds":0})
+        self._send(200, {"success": True})
+    def log_message(self,*a): pass
+http.server.ThreadingHTTPServer(("127.0.0.1",18100),H).serve_forever()
+PYEOF
+MOCK_STATE="$TMP/state.json" MOCK_POSTS="$TMP/posts" python3 "$TMP/mock.py" &
+MOCK_PID=$!
+sleep 1
+API=(--api-url http://127.0.0.1:18100)
+mock_state() { printf '%s' "$1" >"$TMP/state.json"; : >"$TMP/posts"; }
+
+mock_state '{"state":"IDLE","canCommit":false,"canWrite":false}'
+run "${CLEAN[@]}" "$S" "${API[@]}" status; rc_is 0 "m1 status parses mock"; has "state        = IDLE" "m1 idle state"
+mock_state '{"state":"RUNNING","canCommit":false}'
+run "${CLEAN[@]}" "$S" "${API[@]}" start; rc_is 0 "m2 start idempotent skip"; has "start skipped" "m2 skip message"
+[ -s "$TMP/posts" ] && bad "m2 no start POST while RUNNING" || ok "m2 no start POST while RUNNING"
+mock_state '{"state":"IDLE","canCommit":false}'
+run "${CLEAN[@]}" "$S" "${API[@]}" start; rc_is 0 "m3 start accepted"; has "start accepted" "m3 message"
+grep -q "/api/v1/start" "$TMP/posts" && ok "m3 start POST issued" || bad "m3 start POST issued"
+mock_state '{"state":"IDLE","canCommit":false}'
+run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m4 commit gated on canCommit"; has "canCommit=false" "m4 message"
+mock_state '{"state":"RUNNING","canCommit":true}'
+run "${CLEAN[@]}" "$S" "${API[@]}" commit </dev/null; rc_is 1 "m5 commit without --yes refused"; has "non-interactive" "m5 message"
+run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 0 "m6 commit accepted"; has "COMMITTED" "m6 committed"
+grep -q "/api/v1/commit" "$TMP/posts" && ok "m6 commit POST issued" || bad "m6 commit POST issued"
+mock_state '{"state":"COMMITTED","canCommit":false,"canWrite":true}'
+run "${CLEAN[@]}" "$S" "${API[@]}" wait --for committed --timeout 5; rc_is 0 "m7 wait committed immediate"
+run "${CLEAN[@]}" "$S" "${API[@]}" commit; rc_is 0 "m8 commit after COMMITTED idempotent"; has "already COMMITTED" "m8 message"
+run "${CLEAN[@]}" "$S" "${API[@]}" wait --for bogus; rc_is 1 "m9 unknown --for"; has "unknown --for" "m9 message"
+mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
+run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"
+kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null; MOCK_PID=""
 
 printf '\nscript-matrix: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
