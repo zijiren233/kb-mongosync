@@ -672,6 +672,12 @@ sys.exit(0 if ok else 1)' || die "verify failed"
   info "verify passed"
 }
 
+oplog_user_ts() { # ns pod comp -> epoch ms of the last non-noop oplog entry
+  mongosh_js "$1" "$2" "$3" '
+    const e = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(1).toArray()[0];
+    print(e ? e.ts.getTime() : 0)'
+}
+
 cmd_commit() {
   pf_up
   local state can_commit deadline
@@ -683,26 +689,49 @@ cmd_commit() {
   can_commit="$(progress_field canCommit)"
   [ "$can_commit" = "True" ] || die "canCommit=false (state=$state); run wait --for can-commit first"
   # mongosync 1.16 fatals (verifier race) if source writes land after final
-  # verification begins; require a sustained lag of 0 before POSTing
-  local lag quiet=0 i
+  # verification begins. lag alone cannot prove quietness: idle replica sets
+  # write a noop oplog entry every 10s, sawtoothing lag between 0 and ~11, so
+  # accept one noop period and confirm no user ops via the oplog in auto mode.
+  local lag quiet=0 i ts1 ts2 src_comp sp
   for i in 1 2 3; do
     lag="$(progress_field lagTimeSeconds)"
-    if [ "${lag:-x}" = "0" ]; then quiet=$((quiet+1)); else quiet=0; fi
+    case "${lag:-}" in
+      ""|*[!0-9]*) quiet=0 ;;
+      *) if [ "$lag" -le 15 ]; then quiet=$((quiet+1)); else quiet=0; fi ;;
+    esac
     [ "$i" -lt 3 ] && sleep 5
   done
   if [ "$quiet" -lt 3 ]; then
     if [ "$FORCE" -eq 1 ]; then
       warn "source still replicating (lag=${lag:-n/a}); --force given, committing anyway"
     else
-      die "source not quiet (lag=${lag:-n/a}); stop writers, wait for lag=0, retry -- use --force to override"
+      die "source not quiet (lag=${lag:-n/a} > 15s on some samples); stop writers, wait, retry -- use --force to override"
     fi
+  fi
+  if [ "$MODE" = auto ]; then
+    src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
+    sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
+    if [ -n "$sp" ]; then
+      ts1="$(oplog_user_ts "$SRC_NS" "$sp" "$src_comp")"
+      sleep 8
+      ts2="$(oplog_user_ts "$SRC_NS" "$sp" "$src_comp")"
+      if [ "${ts1:-x}" != "${ts2:-y}" ]; then
+        if [ "$FORCE" -eq 1 ]; then
+          warn "user writes still landing on source (oplog advanced); --force given, committing anyway"
+        else
+          die "user writes still landing on source (oplog advanced between samples); stop writers and retry"
+        fi
+      fi
+    fi
+  else
+    warn "quiet check is lag-only here (manual/in-pod mode); make sure writers are stopped yourself"
   fi
   cat >&2 <<EOF
 
 About to commit the migration (POST /api/v1/commit). Notes:
-  1. mongosync write-blocks the SOURCE during commit. On 1.16 a write that
-     races the final verification aborts mongosync fatally, so this command
-     requires a quiet source (3 consecutive lag=0 samples) unless --force.
+  1. mongosync write-blocks the SOURCE during commit. On 1.16 a user write
+     that races the final verification aborts mongosync fatally, so this
+     command checks the source is quiet first (lag + oplog) unless --force.
   2. After COMMITTED the destination is writable and the source stays
      blocked until you run the unblock subcommand.
   3. Commit is final (reverse is only possible before commit).

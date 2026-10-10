@@ -67,7 +67,7 @@ CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd
 
 ## Commit semantics
 
-- `commit` requires a quiet source: three consecutive lag=0 samples before it POSTs, because mongosync 1.16 fatals if a write races its final verification (leaves the sync stalled and the source unblocked). `--force` overrides.
+- `commit` requires a quiet source: lag samples at or under one noop-write period, plus (auto mode) an oplog check proving no user writes are landing. mongosync 1.16 fatals if a write races its final verification, leaving the sync stalled and the source unblocked. `--force` overrides.
 - After `COMMITTED` the destination is writable and the source stays blocked until `unblock`.
 - Commit is final; reverse is only possible before commit.
 
