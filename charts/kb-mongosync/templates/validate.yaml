@@ -1,0 +1,6 @@
+{{- if and (or .Values.source.uri .Values.destination.uri) (not (and .Values.source.uri .Values.destination.uri)) }}
+{{- fail "manual mode needs both source.uri and destination.uri" }}
+{{- end }}
+{{- if and (not .Values.source.uri) (or (not .Values.source.namespace) (not .Values.source.cluster) (not .Values.destination.namespace) (not .Values.destination.cluster)) }}
+{{- fail "serviceAccount mode needs source.namespace/cluster and destination.namespace/cluster (or set both uris for manual mode)" }}
+{{- end }}

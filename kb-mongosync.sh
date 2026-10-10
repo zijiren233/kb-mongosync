@@ -672,6 +672,10 @@ EOF
 }
 
 cmd_teardown() {
+  if ! helm status "$RELEASE" -n "$NAMESPACE" >/dev/null 2>&1; then
+    info "release $NAMESPACE/$RELEASE not found (already removed)"
+    return 0
+  fi
   helm uninstall "$RELEASE" -n "$NAMESPACE" --wait --timeout 2m \
     || die "helm uninstall failed (release $NAMESPACE/$RELEASE)"
   info "teardown done"

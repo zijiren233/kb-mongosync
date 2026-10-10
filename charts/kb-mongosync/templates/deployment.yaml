@@ -17,7 +17,7 @@ spec:
       labels:
         {{- include "kb-mongosync.labels" . | nindent 8 }}
     spec:
-      {{- if .Values.serviceAccount.create }}
+      {{- if or .Values.serviceAccount.create .Values.serviceAccount.name }}
       serviceAccountName: {{ .Values.serviceAccount.name | default (include "kb-mongosync.fullname" .) }}
       {{- end }}
       containers:
