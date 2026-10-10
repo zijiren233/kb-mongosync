@@ -3,8 +3,8 @@
 # MSVER is the only source of truth for the bundled mongosync version.
 # Upstream artifact names differ per arch: amd64 uses the ubuntu2204 build,
 # arm64 only ships an Amazon Linux 2023 build (glibc 2.34 <= ubuntu 22.04's 2.35).
-# The entrypoint waits for /etc/mongosync/conf.json (mounted by the chart from
-# a Secret created by kb-mongosync.sh) and then execs mongosync.
+# Bundles kubectl so the entrypoint can discover clusters in-pod via the
+# ServiceAccount, and kb-mongosync to drive the API from inside the pod.
 FROM ubuntu:22.04
 
 ARG MSVER=1.16.0
@@ -31,6 +31,11 @@ RUN set -eux; \
     install -m 0755 "${bin}" /usr/local/bin/mongosync; \
     rm -rf /tmp/mongosync.tgz /tmp/mongosync-*; \
     mongosync --version; \
+    kver="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"; \
+    curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${kver}/bin/linux/${TARGETARCH}/kubectl"; \
+    chmod 0755 /usr/local/bin/kubectl; \
+    kubectl version --client=true >/dev/null; \
     useradd --uid 10001 --system --no-create-home mongosync
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

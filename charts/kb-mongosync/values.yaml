@@ -4,17 +4,31 @@ image:
 
 nameOverride: ""
 
+# Two configuration modes:
+#   serviceAccount mode: set namespace+cluster for both sides; the pod uses its
+#     ServiceAccount to discover replica set names, pod FQDNs and credentials
+#     (requires serviceAccount.create and rbac.create)
+#   manual mode: set uri for both sides; nothing is discovered in-cluster
+source:
+  uri: ""
+  namespace: ""
+  cluster: ""
+  component: ""
+
+destination:
+  uri: ""
+  namespace: ""
+  cluster: ""
+  component: ""
+
 serviceAccount:
-  create: false
+  create: true
   name: ""
 
 rbac:
-  create: false
-  rules:
-    - apiGroups: [""]
-      resources: ["pods", "services", "secrets"]
-      verbs: ["get", "list", "watch"]
+  create: true
 
+verbosity: INFO
 port: 27180
 
 resources:

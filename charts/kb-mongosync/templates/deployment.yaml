@@ -17,17 +17,47 @@ spec:
       labels:
         {{- include "kb-mongosync.labels" . | nindent 8 }}
     spec:
-      {{- with .Values.serviceAccount }}
-      {{- if and .create .name }}
-      serviceAccountName: {{ .name }}
-      {{- else if .create }}
-      serviceAccountName: {{ include "kb-mongosync.fullname" $ }}
-      {{- end }}
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ .Values.serviceAccount.name | default (include "kb-mongosync.fullname" .) }}
       {{- end }}
       containers:
         - name: mongosync
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion | default "latest" }}"
           imagePullPolicy: Always
+          env:
+            - name: KBMS_VERBOSITY
+              value: {{ .Values.verbosity | quote }}
+            - name: KBMS_PORT
+              value: {{ .Values.port | quote }}
+            {{- if and .Values.source.uri .Values.destination.uri }}
+            - name: KBMS_SOURCE_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kb-mongosync.fullname" . }}-conf
+                  key: sourceUri
+            - name: KBMS_DESTINATION_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kb-mongosync.fullname" . }}-conf
+                  key: destinationUri
+            {{- else }}
+            - name: KBMS_SOURCE_NAMESPACE
+              value: {{ .Values.source.namespace | quote }}
+            - name: KBMS_SOURCE_CLUSTER
+              value: {{ .Values.source.cluster | quote }}
+            {{- with .Values.source.component }}
+            - name: KBMS_SOURCE_COMPONENT
+              value: {{ . | quote }}
+            {{- end }}
+            - name: KBMS_DESTINATION_NAMESPACE
+              value: {{ .Values.destination.namespace | quote }}
+            - name: KBMS_DESTINATION_CLUSTER
+              value: {{ .Values.destination.cluster | quote }}
+            {{- with .Values.destination.component }}
+            - name: KBMS_DESTINATION_COMPONENT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
           ports:
             - name: api
               containerPort: {{ .Values.port }}
@@ -46,14 +76,3 @@ spec:
             failureThreshold: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          volumeMounts:
-            - name: conf
-              mountPath: /etc/mongosync
-              readOnly: true
-      volumes:
-        # The config Secret is created outside Helm by kb-mongosync.sh with the
-        # conventional name <release>-conf; the entrypoint waits for it.
-        - name: conf
-          secret:
-            secretName: {{ .Release.Name }}-conf
-            optional: true

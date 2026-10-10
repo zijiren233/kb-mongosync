@@ -1,10 +1,10 @@
 # kb-mongosync
 
-Migrate MongoDB clusters with [mongosync](https://www.mongodb.com/docs/mongosync/): full copy, real-time incremental sync, and a commit that closes the source sync channel. mongosync runs as a Helm release; `kb-mongosync.sh` installs the chart, injects the connection config at runtime, and drives the HTTP API.
+Migrate MongoDB clusters with [mongosync](https://www.mongodb.com/docs/mongosync/): full copy, real-time incremental sync, and a commit that closes the source sync channel. The Helm chart deploys mongosync and the pod resolves its own config at startup; `kb-mongosync.sh` installs the chart and drives the HTTP API — from your laptop or from inside the pod.
 
-## Quick start (auto mode)
+## Quick start (serviceAccount mode)
 
-Connection strings, replica set names and credentials are discovered from KubeBlocks clusters via kubectl.
+Connection strings, replica set names and credentials are discovered in-pod via the chart's ServiceAccount. From the laptop:
 
 ```bash
 ./kb-mongosync.sh --kubeconfig ~/kubeconfigs/migrator.yaml \
@@ -17,9 +17,16 @@ Connection strings, replica set names and credentials are discovered from KubeBl
 ./kb-mongosync.sh ... teardown
 ```
 
+Or exec into the pod and drive it there (no kubeconfig needed on the pod side):
+
+```bash
+kubectl exec -it <pod> -- kb-mongosync status
+kubectl exec -it <pod> -- kb-mongosync commit --yes
+```
+
 ## Manual mode
 
-No kubectl discovery: provide both endpoints yourself. `deploy` installs the chart, `configure` writes the config Secret from the given URIs, and `--api-url` drives the release without kubectl.
+Provide both endpoints yourself; nothing is discovered in-cluster and no ServiceAccount is created. Pair with `--api-url` to drive a release without kubectl.
 
 ```bash
 ./kb-mongosync.sh --namespace <ns> \
@@ -27,20 +34,24 @@ No kubectl discovery: provide both endpoints yourself. `deploy` installs the cha
   --destination-uri 'mongodb://user:pass@host3:27017/?replicaSet=rs1' \
   deploy
 
-./kb-mongosync.sh --namespace <ns> --source-uri ... --destination-uri ... configure
-
-./kb-mongosync.sh --api-url http://<svc>:27180 start
-./kb-mongosync.sh --api-url http://<svc>:27180 commit --yes
+./kb-mongosync.sh --namespace <ns> --source-uri ... --destination-uri ... status
+./kb-mongosync.sh --namespace <ns> --source-uri ... --destination-uri ... commit --yes
 ./kb-mongosync.sh --namespace <ns> --source-uri ... --destination-uri ... teardown
+```
+
+## Chart
+
+`charts/kb-mongosync` takes the full configuration as values. `source`/`destination` each accept either `uri` (manual mode) or `namespace` + `cluster` (+ optional `component`; serviceAccount mode, needs `serviceAccount.create: true` and `rbac.create: true`, the defaults). The chart renders a ServiceAccount, a Role in both the source and destination namespaces, a Secret for manual URIs, and a Deployment whose entrypoint builds the config (in-pod discovery via kubectl or direct URIs) and execs mongosync. Probes exec inside the container because the mongosync API binds localhost only. Published on tags as `oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync`.
+
+```bash
+helm install msync oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync --version 0.2.0 \
+  --set source.namespace=db --set source.cluster=mg6 \
+  --set destination.namespace=db --set destination.cluster=mg8
 ```
 
 ## Subcommands
 
-`check`, `deploy`, `configure`, `start`, `status`, `wait --for copy|lag|can-commit|committed`, `verify`, `commit`, `unblock`, `teardown`, `rbac`, `run`. All are idempotent; state is derived from the cluster on every invocation, so any step can be retried or resumed. `check`, `verify`, `unblock` and `rbac` require auto mode; in manual mode they print what to run instead.
-
-## Chart
-
-`charts/kb-mongosync` installs the workload only: Deployment (recreate strategy, localhost exec probes, 2Gi limit) and optional ServiceAccount/RBAC (`serviceAccount.create`, `rbac.create`). Connection config is not a chart value: the container entrypoint waits for the Secret `<release>-conf` (key `conf.json`), which `configure` creates outside Helm; the pod restarts automatically when the config changes. Published on tags as `oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync` (charts live in a dedicated ghcr repository, separate from images).
+`check`, `deploy`, `render-conf`, `start`, `status`, `wait --for copy|lag|can-commit|committed`, `verify`, `commit`, `unblock`, `teardown`, `rbac`, `run`. All are idempotent; state is derived from the cluster on every invocation, so any step can be retried or resumed. `check`, `verify`, `unblock` and `rbac` require auto mode; in manual mode they print what to run instead.
 
 ## mongosync version
 
@@ -48,11 +59,11 @@ Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0, the
 
 ## Permissions
 
-Auto mode needs: `clusters get/list`, `deployments get/list`, `pods/services/secrets/configmaps get/list/watch`, `secrets create/delete` (config injection), `pods/exec + pods/portforward create`, `pods delete`, `events get/list` — see `rbac.yaml` or generate with concrete names via the `rbac` subcommand. Helm itself requires install rights on deployments and services in the release namespace.
+serviceAccount mode grants the pod: `clusters get/list`, `pods get/list`, `secrets get`, `pods/exec create` in the source and destination namespaces (chart-managed via `rbac.create`). The laptop-side script needs the same reads plus `pods/portforward` and release-management rights for helm — see `rbac.yaml` or the `rbac` subcommand.
 
 ## Image
 
-CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd64` + `linux/arm64` to ghcr.io (docker.io too when `DOCKERHUB_*` variables are set). mongosync ships no official container image; the arm64 image bundles the upstream Amazon 2023 build (glibc compatible with the ubuntu:22.04 base).
+CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd64` + `linux/arm64` to ghcr.io (docker.io too when `DOCKERHUB_*` variables are set). The image bundles mongosync, kubectl (in-pod discovery) and kb-mongosync; the arm64 build bundles the upstream Amazon 2023 artifact (glibc compatible with the ubuntu:22.04 base).
 
 ## Commit semantics
 

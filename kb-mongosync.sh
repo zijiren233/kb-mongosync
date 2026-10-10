@@ -83,18 +83,21 @@ Options:
   -h | --help             show this help
 
 Subcommands:
-  check     preflight (auto mode only: clusters, versions, credentials, empty destination)
-  deploy    helm upgrade --install of the chart (workload only, no config)
-  configure create or update the config Secret; restarts the pod on change
-  start     start the sync
-  status    show sync state
-  wait      wait for a condition (--for)
-  verify    compare counts and dbHash on both sides (auto mode)
-  commit    commit the migration (source write-blocked, then COMMITTED)
-  unblock   re-enable writes on the source (auto mode)
-  teardown  helm uninstall the release and delete the config Secret
-  rbac      print least-privilege Role/RoleBinding
-  run       check, deploy, configure, start, wait for copy, status
+  check       preflight (auto mode only: clusters, versions, credentials, empty destination)
+  deploy      helm upgrade --install with chart values built from the chosen mode
+  render-conf print the mongosync config resolved from KBMS_* env (used by the image entrypoint)
+  start       start the sync
+  status      show sync state
+  wait        wait for a condition (--for)
+  verify      compare counts and dbHash on both sides (auto mode)
+  commit      commit the migration (source write-blocked, then COMMITTED)
+  unblock     re-enable writes on the source (auto mode)
+  teardown    helm uninstall the release
+  rbac        print least-privilege Role/RoleBinding
+  run         check, deploy, start, wait for copy, status
+
+API-driving subcommands (start/status/wait/commit) also work inside the pod:
+  kubectl exec -it <pod> -- kb-mongosync status
 EOF
 }
 
@@ -102,7 +105,7 @@ need_value() { [ $# -ge 2 ] || die "option $1 requires a value"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --kubeconfig)    need_value "$@"; KCTL_CFG="$2"; shift 2 ;;
+    --kubeconfig)    need_value "$@"; KCTL_CFG="$2"; KCFG_GIVEN=1; shift 2 ;;
     --source-uri)    need_value "$@"; SRC_URI="$2"; shift 2 ;;
     --destination-uri) need_value "$@"; DST_URI="$2"; shift 2 ;;
     --src-ns)        need_value "$@"; SRC_NS="$2"; shift 2 ;;
@@ -129,26 +132,42 @@ done
 
 [ -n "$SUBCMD" ] || { usage; exit 1; }
 
-if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
-  [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
-  [ -z "$SRC_CLUSTER" ] && [ -z "$DST_CLUSTER" ] || die "manual mode conflicts with --src-cluster/--dst-cluster"
-  MODE=manual
-else
-  [ -n "$SRC_NS" ]     || die "missing --src-ns (or use --source-uri manual mode)"
-  [ -n "$SRC_CLUSTER" ]|| die "missing --src-cluster"
-  [ -n "$DST_NS" ]     || die "missing --dst-ns"
-  [ -n "$DST_CLUSTER" ]|| die "missing --dst-cluster"
-  MODE=auto
-fi
-[ -n "$RELEASE" ] || RELEASE="$([ "$MODE" = auto ] && printf 'msync-%s-to-%s' "$SRC_CLUSTER" "$DST_CLUSTER" || echo msync-manual)"
-[ -n "$NAMESPACE" ] || { [ "$MODE" = auto ] && NAMESPACE="$SRC_NS" || die "manual mode needs --namespace"; }
+# Only subcommands that touch KubeBlocks clusters or build chart values need a
+# full input mode; API-driving subcommands work standalone (also in-pod).
+case "$SUBCMD" in
+  check|deploy|verify|unblock|rbac)
+    if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
+      [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
+      MODE=manual
+    else
+      [ -n "$SRC_NS" ]     || die "missing --src-ns (or use --source-uri manual mode)"
+      [ -n "$SRC_CLUSTER" ]|| die "missing --src-cluster"
+      [ -n "$DST_NS" ]     || die "missing --dst-ns"
+      [ -n "$DST_CLUSTER" ]|| die "missing --dst-cluster"
+      MODE=auto
+    fi
+    ;;
+esac
+[ -n "$RELEASE" ] || RELEASE="$([ "${MODE:-}" = auto ] && printf 'msync-%s-to-%s' "$SRC_CLUSTER" "$DST_CLUSTER" || echo msync-manual)"
+case "$SUBCMD" in
+  deploy|teardown)
+    if [ -z "$NAMESPACE" ]; then
+      [ "${MODE:-}" = auto ] && NAMESPACE="$SRC_NS" || die "manual mode needs --namespace"
+    fi
+    ;;
+esac
 
-command -v kubectl >/dev/null 2>&1 || [ "$MODE" = manual ] || die "missing dependency: kubectl"
-command -v helm >/dev/null 2>&1 || die "missing dependency: helm"
-
-if [ "$MODE" = auto ]; then
-  [ -f "$KCTL_CFG" ] || die "kubeconfig not found: $KCTL_CFG"
-  export KUBECONFIG="$KCTL_CFG"
+case "$SUBCMD" in
+  deploy|teardown) command -v helm >/dev/null 2>&1 || die "missing dependency: helm" ;;
+esac
+if [ "${MODE:-}" = auto ]; then
+  command -v kubectl >/dev/null 2>&1 || die "missing dependency: kubectl"
+  if [ -n "${KUBECONFIG:-}" ] && [ "$KCFG_GIVEN" -ne 1 ]; then
+    : # in-pod or caller-provided environment
+  else
+    [ -f "$KCTL_CFG" ] || die "kubeconfig not found: $KCTL_CFG"
+    export KUBECONFIG="$KCTL_CFG"
+  fi
 fi
 
 kc() { kubectl "$@"; }
@@ -237,7 +256,8 @@ build_uri() { # ns cluster component
   printf 'mongodb://%s:%s@%s/?replicaSet=%s' "$u" "$p" "$seeds" "$rs"
 }
 
-# mongosync API access: --api-url directly, or kubectl port-forward to the release pod.
+# mongosync API access: KBMS_API_URL/--api-url directly (also set in-pod by the
+# entrypoint), or kubectl port-forward to the release pod.
 API_BASE=""
 
 release_pod() {
@@ -263,7 +283,8 @@ wait_release_pod_ready() { # timeout_secs
 pf_up() {
   [ -n "$API_BASE" ] && return 0
   if [ -n "$API_URL" ]; then API_BASE="$API_URL"; return 0; fi
-  [ "$MODE" = auto ] || die "manual mode needs --api-url to reach the API"
+  if [ -n "${KBMS_API_URL:-}" ]; then API_BASE="$KBMS_API_URL"; return 0; fi
+  command -v kubectl >/dev/null 2>&1 || die "no kubectl and no --api-url; cannot reach the API"
   local pod p tried=0 i
   pod="$(release_pod)"
   [ -n "$pod" ] || die "no pod found for release $NAMESPACE/$RELEASE (run deploy first)"
@@ -383,61 +404,69 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
 }
 
 cmd_deploy() {
-  local extra=()
+  local extra=() src_comp dst_comp
   [ -n "$IMAGE" ] && extra+=(--set-string "image.tag=${IMAGE##*:}")
   [ -n "$CHART_VERSION" ] && [ -z "$CHART_DIR" ] && extra+=(--version "$CHART_VERSION")
-  info "helm upgrade --install $NAMESPACE/$RELEASE (no config; run configure next)"
-  helm upgrade --install "$RELEASE" "$(chart_ref)" -n "$NAMESPACE" \
-    --timeout 3m "${extra[@]}" \
-    || die "helm install failed"
-  if [ "$MODE" = auto ]; then
-    wait_release_pod_ready 300 \
-      || info "pod Running (mongosync starts once configure provides the config Secret)"
-  fi
-  info "deploy done: release $NAMESPACE/$RELEASE"
-}
 
-cmd_configure() {
-  local src_comp dst_comp secret_name="${RELEASE}-conf" existing
-  if [ "$MODE" = auto ]; then
-    src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
-    dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
-    SRC_URI="$(build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
-    DST_URI="$(build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
-  fi
-  [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "no connection strings available"
-  cat > "$KB_TMP/conf.json" <<EOF
-{
-  "cluster0": "${SRC_URI}",
-  "cluster1": "${DST_URI}",
-  "port": 27180,
-  "verbosity": "INFO",
-  "disableTelemetry": true
-}
+  info "writing chart values (connection strings never logged)"
+  if [ "$MODE" = manual ]; then
+    cat > "$KB_TMP/values.yaml" <<EOF
+source:
+  uri: "${SRC_URI}"
+destination:
+  uri: "${DST_URI}"
+serviceAccount:
+  create: false
+rbac:
+  create: false
 EOF
-  chmod 600 "$KB_TMP/conf.json"
-
-  existing="$(kc_never_fails kc get secret "$secret_name" -n "$NAMESPACE" -o jsonpath='{.data.conf\.json}' | base64 -d)"
-  if [ "$existing" = "$(cat "$KB_TMP/conf.json")" ]; then
-    info "config Secret already up to date, skipping"
-    return 0
-  fi
-  if kc get secret "$secret_name" -n "$NAMESPACE" >/dev/null 2>&1; then
-    info "config changed, replacing Secret and restarting the pod"
-    kc delete secret "$secret_name" -n "$NAMESPACE" >/dev/null
-    kc create secret generic "$secret_name" -n "$NAMESPACE" \
-      --from-file=conf.json="$KB_TMP/conf.json" >/dev/null || die "failed to create config Secret"
-    kc delete pod -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
-      -n "$NAMESPACE" >/dev/null
   else
-    kc create secret generic "$secret_name" -n "$NAMESPACE" \
-      --from-file=conf.json="$KB_TMP/conf.json" >/dev/null || die "failed to create config Secret"
+    src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")" || die "source component discovery failed"
+    dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")" || die "destination component discovery failed"
+    cat > "$KB_TMP/values.yaml" <<EOF
+source:
+  namespace: "${SRC_NS}"
+  cluster: "${SRC_CLUSTER}"
+  component: "${src_comp}"
+destination:
+  namespace: "${DST_NS}"
+  cluster: "${DST_CLUSTER}"
+  component: "${dst_comp}"
+EOF
   fi
-  if [ "$MODE" = auto ]; then
-    wait_release_pod_ready 300 \
-      || die "mongosync pod not Ready after configure"
+  chmod 600 "$KB_TMP/values.yaml"
+
+  info "helm upgrade --install $NAMESPACE/$RELEASE"
+  helm upgrade --install "$RELEASE" "$(chart_ref)" -n "$NAMESPACE" \
+    -f "$KB_TMP/values.yaml" --wait --timeout 5m "${extra[@]}" \
+    || die "helm install failed"
+  info "deploy done: release $NAMESPACE/$RELEASE (pod discovers and starts mongosync itself)"
+}
+
+# Render the mongosync config from the environment; used by the image
+# entrypoint (KBMS_* env vars set by the chart) and runnable by hand.
+cmd_render_conf() {
+  local src_uri="${KBMS_SOURCE_URI:-}" dst_uri="${KBMS_DESTINATION_URI:-}"
+  local port="${KBMS_PORT:-27180}" verbosity="${KBMS_VERBOSITY:-INFO}"
+  if [ -z "$src_uri" ] || [ -z "$dst_uri" ]; then
+    [ -n "$src_uri$dst_uri" ] && die "manual mode needs both KBMS_SOURCE_URI and KBMS_DESTINATION_URI"
+    SRC_NS="${KBMS_SOURCE_NAMESPACE:-}"
+    SRC_CLUSTER="${KBMS_SOURCE_CLUSTER:-}"
+    DST_NS="${KBMS_DESTINATION_NAMESPACE:-}"
+    DST_CLUSTER="${KBMS_DESTINATION_CLUSTER:-}"
+    COMPONENT="${KBMS_SOURCE_COMPONENT:-}"
+    [ -n "$SRC_NS$SRC_CLUSTER$DST_NS$DST_CLUSTER" ] || die "no KBMS_* configuration found in environment"
+    [ -n "$SRC_NS" ] && [ -n "$SRC_CLUSTER" ] && [ -n "$DST_NS" ] && [ -n "$DST_CLUSTER" ] \
+      || die "incomplete KBMS_* cluster configuration"
+    local src_comp dst_comp
+    src_comp="$([ -n "$COMPONENT" ] && echo "$COMPONENT" || discover_component "$SRC_NS" "$SRC_CLUSTER")"
+    COMPONENT="${KBMS_DESTINATION_COMPONENT:-}"
+    dst_comp="$([ -n "$COMPONENT" ] && echo "$COMPONENT" || discover_component "$DST_NS" "$DST_CLUSTER")"
+    src_uri="$(build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
+    dst_uri="$(build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
   fi
-  info "configure done: $NAMESPACE/$secret_name"
+  printf '{\n  "cluster0": "%s",\n  "cluster1": "%s",\n  "port": %s,\n  "verbosity": "%s",\n  "disableTelemetry": true\n}\n' \
+    "$src_uri" "$dst_uri" "$port" "$verbosity"
 }
 
 cmd_start() {
@@ -644,7 +673,6 @@ EOF
 cmd_teardown() {
   helm uninstall "$RELEASE" -n "$NAMESPACE" --wait --timeout 2m \
     || die "helm uninstall failed (release $NAMESPACE/$RELEASE)"
-  kc delete secret "${RELEASE}-conf" -n "$NAMESPACE" --ignore-not-found >/dev/null
   info "teardown done"
 }
 
@@ -690,7 +718,6 @@ EOF
 cmd_run() {
   cmd_check
   cmd_deploy
-  cmd_configure
   cmd_start
   WAIT_FOR="copy" cmd_wait
   cmd_status
@@ -707,17 +734,17 @@ EOF
 }
 
 case "$SUBCMD" in
-  check)     cmd_check ;;
-  deploy)    cmd_deploy ;;
-  configure) cmd_configure ;;
-  start)     cmd_start ;;
-  status)   cmd_status ;;
-  wait)     cmd_wait ;;
-  verify)   cmd_verify ;;
-  commit)   cmd_commit ;;
-  unblock)  cmd_unblock ;;
-  teardown) cmd_teardown ;;
-  rbac)     cmd_rbac ;;
-  run)      cmd_run ;;
-  *)        usage; exit 1 ;;
+  check)      cmd_check ;;
+  deploy)     cmd_deploy ;;
+  render-conf) cmd_render_conf ;;
+  start)      cmd_start ;;
+  status)     cmd_status ;;
+  wait)       cmd_wait ;;
+  verify)     cmd_verify ;;
+  commit)     cmd_commit ;;
+  unblock)    cmd_unblock ;;
+  teardown)   cmd_teardown ;;
+  rbac)       cmd_rbac ;;
+  run)        cmd_run ;;
+  *)          usage; exit 1 ;;
 esac

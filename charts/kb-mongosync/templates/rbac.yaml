@@ -1,24 +1,45 @@
 {{- if .Values.rbac.create }}
+{{- $fullname := include "kb-mongosync.fullname" . }}
+{{- $saName := .Values.serviceAccount.name | default $fullname }}
+{{- $namespaces := list .Values.source.namespace .Values.destination.namespace | uniq }}
+{{- range $ns := $namespaces }}
+{{- if $ns }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "kb-mongosync.fullname" . }}
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "kb-mongosync.labels" . | nindent 4 }}
+    {{- include "kb-mongosync.labels" $ | nindent 4 }}
 rules:
-  {{- toYaml .Values.rbac.rules | nindent 2 }}
+  - apiGroups: ["apps.kubeblocks.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "kb-mongosync.fullname" . }}
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
   labels:
-    {{- include "kb-mongosync.labels" . | nindent 4 }}
+    {{- include "kb-mongosync.labels" $ | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "kb-mongosync.fullname" . }}
+  name: {{ $fullname }}
 subjects:
   - kind: ServiceAccount
-    name: {{ .Values.serviceAccount.name | default (include "kb-mongosync.fullname" .) }}
+    name: {{ $saName }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}
 {{- end }}
