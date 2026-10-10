@@ -67,9 +67,11 @@ CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd
 
 ## Commit semantics
 
+- `start` sends `enableUserWriteBlocking: true` to mongosync by default (`--no-write-blocking` to opt out); 1.16.0 accepts it (`Mode: sourceAndDestination`) and it is what keeps the source blocked after `COMMITTED` until `unblock` releases it.
+- The flag does not make commit safe on 1.16.0: measured live, final verification begins before the block takes effect, and a write landing in that window still kills mongosync fatally (verifier race reproduced with the flag on — the fatal insert landed one oplog position after verification started, and a concurrent writer saw zero rejected writes). The quiet gate below, or an explicit freeze, remains the actual protection.
 - Recommended cutover: `block --yes` (freezes the source primary via fsync lock — writes stall, reads keep working, engagement verified by a probe write) -> `commit --yes` (the oplog gate sees a frozen source) -> switch the app to the destination -> `unblock --yes`. Blocking first makes the commit race structurally impossible: no user write can land while final verification runs.
 - `commit` also gates on a quiet source by itself (oplog quiescence over an 8s window wherever the tool can reach the clusters, strict all-zero lag in manual mode) — mongosync 1.16 fatals if a write races its final verification, and a mid-commit death requires recreating the destination. `--force` overrides.
-- Keep the freeze window short; if the tool dies while frozen, recover with `db.adminCommand({fsyncUnlock: 1})` on the source primary.
+- Keep the freeze window short; if the tool dies while frozen, recover with `db.adminCommand({fsyncUnlock: 1})` on the source primary. If mongosync itself dies mid-commit, the source block lapses on its own once the dead client's lease expires (observed writable again within ~30s).
 - After `COMMITTED` the destination is writable and the source stays blocked until `unblock`.
 - Commit is final; reverse is only possible before commit.
 
