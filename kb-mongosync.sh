@@ -10,9 +10,10 @@
 #            --api-url drives an existing release without kubectl
 set -Eeuo pipefail
 
-log()  { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+# All logging goes to stderr so captured stdout carries data only.
+log()  { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 info() { log "INFO  $*"; }
-warn() { log "WARN  $*" >&2; }
+warn() { log "WARN  $*"; }
 die()  { log "ERROR $*" >&2; exit 1; }
 
 KB_TMP="$(mktemp -d "${TMPDIR:-/tmp}/kb-mongosync.XXXXXX")"
@@ -240,8 +241,23 @@ build_uri() { # ns cluster component
 API_BASE=""
 
 release_pod() {
-  kc_never_fails kc get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
-    -o jsonpath='{.items[0].metadata.name}'
+  kc_never_fails kc get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" -o json | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+run=[p for p in d.get("items",[]) if p.get("status",{}).get("phase")=="Running"]
+print(run[0]["metadata"]["name"] if run else "")'
+}
+
+wait_release_pod_ready() { # timeout_secs
+  local deadline=$(( $(date +%s) + $1 )) ready
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    ready="$(kc_never_fails kc get pods -n "$NAMESPACE" \
+      -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
+      -o jsonpath='{.items[0].status.containerStatuses[0].ready}')"
+    [ "$ready" = "true" ] && return 0
+    sleep 3
+  done
+  return 1
 }
 
 pf_up() {
@@ -375,8 +391,7 @@ cmd_deploy() {
     --timeout 3m "${extra[@]}" \
     || die "helm install failed"
   if [ "$MODE" = auto ]; then
-    kc wait pod -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
-      -n "$NAMESPACE" --for=condition=Ready --timeout=180s >/dev/null 2>&1 \
+    wait_release_pod_ready 300 \
       || info "pod Running (mongosync starts once configure provides the config Secret)"
   fi
   info "deploy done: release $NAMESPACE/$RELEASE"
@@ -419,8 +434,7 @@ EOF
       --from-file=conf.json="$KB_TMP/conf.json" >/dev/null || die "failed to create config Secret"
   fi
   if [ "$MODE" = auto ]; then
-    kc wait pod -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
-      -n "$NAMESPACE" --for=condition=Ready --timeout=300s >/dev/null \
+    wait_release_pod_ready 300 \
       || die "mongosync pod not Ready after configure"
   fi
   info "configure done: $NAMESPACE/$secret_name"
@@ -428,6 +442,7 @@ EOF
 
 cmd_start() {
   local state resp
+  pf_up
   state="$(progress_field state)"
   case "$state" in
     RUNNING|COMMITTING|COMMITTED)
@@ -451,6 +466,7 @@ else:
 }
 
 cmd_status() {
+  pf_up
   api_get_progress | python3 -c '
 import json,sys
 try:
@@ -470,6 +486,7 @@ if v: print("verification =", json.dumps(v)[:200])'
 }
 
 cmd_wait() {
+  pf_up
   local deadline=$(( $(date +%s) + WAIT_TIMEOUT )) state lag ok
   info "waiting for: $WAIT_FOR (timeout ${WAIT_TIMEOUT}s)"
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -550,6 +567,7 @@ sys.exit(0 if ok else 1)' || die "verify failed"
 }
 
 cmd_commit() {
+  pf_up
   local state can_commit deadline
   state="$(progress_field state)"
   if [ "$state" = "COMMITTED" ]; then
