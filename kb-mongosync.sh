@@ -347,7 +347,15 @@ pf_up() {
 
 api_get_progress() {
   pf_up
-  curl -s --max-time 15 "${API_BASE}/api/v1/progress" || die "GET /api/v1/progress failed"
+  local body i
+  for i in 1 2 3; do
+    if body="$(curl -s --max-time 15 "${API_BASE}/api/v1/progress")"; then
+      printf '%s' "$body"
+      return 0
+    fi
+    [ "$i" -lt 3 ] && { warn "GET /api/v1/progress attempt $i failed; retrying"; sleep 3; }
+  done
+  die "GET /api/v1/progress failed"
 }
 
 api_post() { # path body
