@@ -33,5 +33,6 @@ jobs:
           sed -i "s/^version: .*/version: ${VERSION}/" "$WORK/kb-mongosync/Chart.yaml"
           helm lint "$WORK/kb-mongosync"
           helm package "$WORK/kb-mongosync" -d "$WORK"
+          # charts must live in their own ghcr repository, separate from images
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
-          helm push "$WORK/kb-mongosync-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository }}"
+          helm push "$WORK/kb-mongosync-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository }}-chart"

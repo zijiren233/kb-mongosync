@@ -44,7 +44,7 @@ NAMESPACE=""
 RELEASE=""
 API_URL=""
 API_PORT=27180
-CHART="oci://ghcr.io/zijiren233/kb-mongosync"
+CHART="oci://ghcr.io/zijiren233/kb-mongosync-chart"
 CHART_VERSION=""
 CHART_DIR=""
 IMAGE=""
@@ -71,7 +71,7 @@ Options:
   --kubeconfig PATH       kubeconfig for kubectl/helm (default $KUBECONFIG)
   --namespace NS          release namespace (default: source namespace in auto mode)
   --release NAME          helm release name (default msync-<src>-to-<dst>, or msync-manual)
-  --chart URI             chart reference (default oci://ghcr.io/zijiren233/kb-mongosync)
+  --chart URI             chart reference (default oci://ghcr.io/zijiren233/kb-mongosync-chart)
   --chart-version V       chart version (defaults to latest)
   --chart-dir PATH        use a local chart directory instead of --chart
   --image URI             override the tool image (repo:tag)
