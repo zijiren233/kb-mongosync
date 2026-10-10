@@ -698,31 +698,38 @@ cmd_commit() {
   [ "$can_commit" = "True" ] || die "canCommit=false (state=$state); run wait --for can-commit first"
   # mongosync 1.16 fatals (verifier race) if source writes land after final
   # verification begins. lag alone cannot prove quietness: idle replica sets
-  # write a noop oplog entry every 10s, sawtoothing lag between 0 and ~11, so
-  # accept one noop period and confirm no user ops via the oplog in auto mode.
-  local lag quiet=0 i ts1 ts2 src_comp sp
+  # write a noop oplog entry every 10s (sawtooth 0..~11), and a live writer
+  # can keep all samples under a loose threshold. The authoritative check is
+  # oplog quiescence (no user ops); only pure manual mode lacks cluster
+  # access and falls back to a strict all-zero lag gate.
+  local lag quiet15=0 quiet0=0 i ts1 ts2 src_comp sp gns gcl
   for i in 1 2 3; do
     lag="$(progress_field lagTimeSeconds)"
     case "${lag:-}" in
-      ""|*[!0-9]*) quiet=0 ;;
-      *) if [ "$lag" -le 15 ]; then quiet=$((quiet+1)); else quiet=0; fi ;;
+      ""|*[!0-9]*) quiet15=0; quiet0=0 ;;
+      0) quiet15=$((quiet15+1)); quiet0=$((quiet0+1)) ;;
+      *) if [ "$lag" -le 15 ]; then quiet15=$((quiet15+1)); else quiet15=0; fi; quiet0=0 ;;
     esac
     [ "$i" -lt 3 ] && sleep 5
   done
-  if [ "$quiet" -lt 3 ]; then
+  gns="$SRC_NS"; gcl="$SRC_CLUSTER"
+  if [ -z "$gns" ] && [ -n "${KBMS_SOURCE_NAMESPACE:-}" ]; then
+    gns="${KBMS_SOURCE_NAMESPACE}"; gcl="${KBMS_SOURCE_CLUSTER:-}"
+  fi
+  if [ "$quiet15" -lt 3 ]; then
     if [ "$FORCE" -eq 1 ]; then
       warn "source still replicating (lag=${lag:-n/a}); --force given, committing anyway"
     else
       die "source not quiet (lag=${lag:-n/a} > 15s on some samples); stop writers, wait, retry -- use --force to override"
     fi
   fi
-  if [ "$MODE" = auto ]; then
-    src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
-    sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
+  if [ -n "$gns" ] && [ -n "$gcl" ]; then
+    src_comp="${KBMS_SOURCE_COMPONENT:-$(discover_component "$gns" "$gcl")}"
+    sp="$(find_primary_pod "$gns" "$gcl" "$src_comp" || true)"
     if [ -n "$sp" ]; then
-      ts1="$(oplog_user_ts "$SRC_NS" "$sp" "$src_comp")"
+      ts1="$(oplog_user_ts "$gns" "$sp" "$src_comp")"
       sleep 8
-      ts2="$(oplog_user_ts "$SRC_NS" "$sp" "$src_comp")"
+      ts2="$(oplog_user_ts "$gns" "$sp" "$src_comp")"
       if [ "${ts1:-x}" != "${ts2:-y}" ]; then
         if [ "$FORCE" -eq 1 ]; then
           warn "user writes still landing on source (oplog advanced); --force given, committing anyway"
@@ -732,7 +739,15 @@ cmd_commit() {
       fi
     fi
   else
-    warn "quiet check is lag-only here (manual/in-pod mode); make sure writers are stopped yourself"
+    if [ "$quiet0" -lt 3 ]; then
+      if [ "$FORCE" -eq 1 ]; then
+        warn "manual mode cannot verify quiescence via the oplog and lag is not all-zero; --force given"
+      else
+        die "manual mode: lag was not 0 on every sample (${lag:-n/a}); confirm writers are stopped, then retry -- use --force to override"
+      fi
+    else
+      warn "manual mode quiet check is strict lag-only; make sure writers are stopped yourself"
+    fi
   fi
   cat >&2 <<EOF
 
