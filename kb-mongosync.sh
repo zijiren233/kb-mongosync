@@ -138,7 +138,7 @@ while [ $# -gt 0 ]; do
     --chart-version) need_value "$@"; CHART_VERSION="$2"; shift 2 ;;
     --chart-dir)     need_value "$@"; CHART_DIR="$2"; shift 2 ;;
     --image)         need_value "$@"; IMAGE="$2"; shift 2 ;;
-    --set)           need_value "$@"; SETOPT+=("$2"); shift 2 ;;
+    --set)           need_value "$@"; SETOPT+=(--set "$2"); shift 2 ;;
     --api-url)       need_value "$@"; API_URL="$2"; shift 2 ;;
     --port)          need_value "$@"; API_PORT="$2"; shift 2 ;;
     --timeout)       need_value "$@"; WAIT_TIMEOUT="$2"; shift 2 ;;
