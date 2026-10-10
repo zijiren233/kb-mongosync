@@ -54,6 +54,7 @@ SETOPT=()
 COMPONENT=""
 WAIT_TIMEOUT=1800
 ASSUME_YES=0
+FORCE=0
 
 SUBCMD=""
 WAIT_FOR="copy"
@@ -85,6 +86,7 @@ Options:
   --timeout SECS          wait/commit timeout (default 1800)
   --for COND              wait condition: copy|lag|can-commit|committed
   --yes                   assume yes (required in non-interactive sessions)
+  --force                 allow commit even if the source is not quiet
   -h | --help             show this help
 
 Subcommands:
@@ -144,6 +146,7 @@ while [ $# -gt 0 ]; do
     --timeout)       need_value "$@"; WAIT_TIMEOUT="$2"; shift 2 ;;
     --for)           need_value "$@"; WAIT_FOR="$2"; shift 2 ;;
     --yes|-y)        ASSUME_YES=1; shift ;;
+    --force)         FORCE=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     -*)              die "unknown option: $1 (see --help)" ;;
     *)               [ -z "$SUBCMD" ] || die "only one subcommand allowed: '$SUBCMD' and '$1'"
@@ -674,13 +677,27 @@ cmd_commit() {
   fi
   can_commit="$(progress_field canCommit)"
   [ "$can_commit" = "True" ] || die "canCommit=false (state=$state); run wait --for can-commit first"
+  # mongosync 1.16 fatals (verifier race) if source writes land after final
+  # verification begins; require a sustained lag of 0 before POSTing
+  local lag quiet=0 i
+  for i in 1 2 3; do
+    lag="$(progress_field lagTimeSeconds)"
+    if [ "${lag:-x}" = "0" ]; then quiet=$((quiet+1)); else quiet=0; fi
+    [ "$i" -lt 3 ] && sleep 5
+  done
+  if [ "$quiet" -lt 3 ]; then
+    if [ "$FORCE" -eq 1 ]; then
+      warn "source still replicating (lag=${lag:-n/a}); --force given, committing anyway"
+    else
+      die "source not quiet (lag=${lag:-n/a}); stop writers, wait for lag=0, retry -- use --force to override"
+    fi
+  fi
   cat >&2 <<EOF
 
 About to commit the migration (POST /api/v1/commit). Notes:
-  1. mongosync immediately write-blocks the SOURCE cluster. During the
-     COMMITTING window (seconds, minutes at high lag) source writes fail.
-     Stop or degrade write traffic first if the workload cannot tolerate
-     write errors.
+  1. mongosync write-blocks the SOURCE during commit. On 1.16 a write that
+     races the final verification aborts mongosync fatally, so this command
+     requires a quiet source (3 consecutive lag=0 samples) unless --force.
   2. After COMMITTED the destination is writable and the source stays
      blocked until you run the unblock subcommand.
   3. Commit is final (reverse is only possible before commit).

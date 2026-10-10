@@ -114,7 +114,7 @@ run "${CLEAN[@]}" "$S" "${API[@]}" start; rc_is 0 "m3 start accepted"; has "star
 grep -q "/api/v1/start" "$TMP/posts" && ok "m3 start POST issued" || bad "m3 start POST issued"
 mock_state '{"state":"IDLE","canCommit":false}'
 run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m4 commit gated on canCommit"; has "canCommit=false" "m4 message"
-mock_state '{"state":"RUNNING","canCommit":true}'
+mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":0}'
 run "${CLEAN[@]}" "$S" "${API[@]}" commit </dev/null; rc_is 1 "m5 commit without --yes refused"; has "non-interactive" "m5 message"
 run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 0 "m6 commit accepted"; has "COMMITTED" "m6 committed"
 grep -q "/api/v1/commit" "$TMP/posts" && ok "m6 commit POST issued" || bad "m6 commit POST issued"
@@ -124,6 +124,11 @@ run "${CLEAN[@]}" "$S" "${API[@]}" commit; rc_is 0 "m8 commit after COMMITTED id
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for bogus; rc_is 1 "m9 unknown --for"; has "unknown --for" "m9 message"
 mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"
+mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":4}'
+: >"$TMP/posts"
+run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m11 commit refused while source not quiet"; has "source not quiet" "m11 message"
+[ -s "$TMP/posts" ] && bad "m11 no commit POST issued" || ok "m11 no commit POST issued"
+run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes --force; rc_is 0 "m12 --force overrides quiet gate"; has "COMMITTED" "m12 committed"
 kill "$MOCK_PID" 2>/dev/null; wait "$MOCK_PID" 2>/dev/null; MOCK_PID=""
 
 printf '\nscript-matrix: %d passed, %d failed\n' "$PASS" "$FAIL"
