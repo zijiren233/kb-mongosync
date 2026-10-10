@@ -98,7 +98,8 @@ Subcommands:
   wait        wait for a condition (--for)
   verify      compare counts and dbHash on both sides (auto mode)
   commit      commit the migration (source write-blocked, then COMMITTED)
-  unblock     re-enable writes on the source (auto mode)
+  block       freeze the source primary now (pre-cutover step; writes stall, reads ok)
+  unblock     unfreeze the source primary (auto mode)
   teardown    helm uninstall the release
   rbac        print least-privilege Role/RoleBinding
   run         check, deploy, start, wait for copy, status
@@ -159,7 +160,7 @@ done
 # Only subcommands that touch KubeBlocks clusters or build chart values need a
 # full input mode; API-driving subcommands work standalone (also in-pod).
 case "$SUBCMD" in
-  check|deploy|verify|unblock|rbac|run)
+  check|deploy|verify|block|unblock|rbac|run)
     if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
       [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
       validate_uri --source-uri "$SRC_URI"
@@ -697,31 +698,14 @@ cmd_commit() {
   can_commit="$(progress_field canCommit)"
   [ "$can_commit" = "True" ] || die "canCommit=false (state=$state); run wait --for can-commit first"
   # mongosync 1.16 fatals (verifier race) if source writes land after final
-  # verification begins. lag alone cannot prove quietness: idle replica sets
-  # write a noop oplog entry every 10s (sawtooth 0..~11), and a live writer
-  # can keep all samples under a loose threshold. The authoritative check is
-  # oplog quiescence (no user ops); only pure manual mode lacks cluster
-  # access and falls back to a strict all-zero lag gate.
-  local lag quiet15=0 quiet0=0 i ts1 ts2 src_comp sp gns gcl
-  for i in 1 2 3; do
-    lag="$(progress_field lagTimeSeconds)"
-    case "${lag:-}" in
-      ""|*[!0-9]*) quiet15=0; quiet0=0 ;;
-      0) quiet15=$((quiet15+1)); quiet0=$((quiet0+1)) ;;
-      *) if [ "$lag" -le 15 ]; then quiet15=$((quiet15+1)); else quiet15=0; fi; quiet0=0 ;;
-    esac
-    [ "$i" -lt 3 ] && sleep 5
-  done
+  # verification begins. The authoritative check is oplog quiescence (no user
+  # ops over an 8s window) wherever the tool can reach the clusters; a frozen
+  # (fsync-locked) source reports a stale growing lag, so lag is only used as
+  # the fallback gate in pure manual mode, and strictly (all samples 0).
+  local lag quiet0=0 i ts1 ts2 src_comp sp gns gcl
   gns="$SRC_NS"; gcl="$SRC_CLUSTER"
   if [ -z "$gns" ] && [ -n "${KBMS_SOURCE_NAMESPACE:-}" ]; then
     gns="${KBMS_SOURCE_NAMESPACE}"; gcl="${KBMS_SOURCE_CLUSTER:-}"
-  fi
-  if [ "$quiet15" -lt 3 ]; then
-    if [ "$FORCE" -eq 1 ]; then
-      warn "source still replicating (lag=${lag:-n/a}); --force given, committing anyway"
-    else
-      die "source not quiet (lag=${lag:-n/a} > 15s on some samples); stop writers, wait, retry -- use --force to override"
-    fi
   fi
   if [ -n "$gns" ] && [ -n "$gcl" ]; then
     src_comp="${KBMS_SOURCE_COMPONENT:-$(discover_component "$gns" "$gcl")}"
@@ -740,16 +724,24 @@ cmd_commit() {
         if [ "$FORCE" -eq 1 ]; then
           warn "user writes still landing on source (oplog advanced); --force given, committing anyway"
         else
-          die "user writes still landing on source (oplog advanced between samples); stop writers and retry"
+          die "user writes still landing on source (oplog advanced between samples); stop writers (or run block) and retry"
         fi
       fi
     fi
   else
+    for i in 1 2 3; do
+      lag="$(progress_field lagTimeSeconds)"
+      case "${lag:-}" in
+        0) quiet0=$((quiet0+1)) ;;
+        *) quiet0=0 ;;
+      esac
+      [ "$i" -lt 3 ] && sleep 5
+    done
     if [ "$quiet0" -lt 3 ]; then
       if [ "$FORCE" -eq 1 ]; then
         warn "manual mode cannot verify quiescence via the oplog and lag is not all-zero; --force given"
       else
-        die "manual mode: lag was not 0 on every sample (${lag:-n/a}); confirm writers are stopped, then retry -- use --force to override"
+        die "manual mode: lag was not 0 on every sample (last=${lag:-n/a}); confirm writers are stopped, then retry -- use --force to override"
       fi
     else
       warn "manual mode quiet check is strict lag-only; make sure writers are stopped yourself"
@@ -795,17 +787,68 @@ print("[commit] accepted, waiting for COMMITTED ...")' || die "commit request re
   die "timed out waiting for COMMITTED (${WAIT_TIMEOUT}s)"
 }
 
+block_probe_js() { # "block" or "unblock"
+  if [ "$1" = block ]; then
+    printf '
+      const r = db.adminCommand({fsync: 1, lock: true});
+      let w = "?";
+      try {
+        db.getSiblingDB("kbms_probe").runCommand({insert: "probe", documents: [{t: new Date()}], maxTimeMS: 2000});
+        w = "WRITABLE";
+        db.getSiblingDB("kbms_probe").dropDatabase();
+      } catch (e) { w = "FROZEN(" + e.codeName + ")"; }
+      print("ok=" + r.ok + " lockCount=" + r.lockCount + " write=" + w);'
+  else
+    printf '
+      const r = db.adminCommand({fsyncUnlock: 1});
+      let w = "?";
+      try {
+        db.getSiblingDB("kbms_probe").probe.insertOne({t: new Date()});
+        w = "WRITABLE";
+        db.getSiblingDB("kbms_probe").dropDatabase();
+      } catch (e) { w = "BLOCKED(" + e.codeName + ")"; }
+      print("ok=" + r.ok + " lockCount=" + r.lockCount + " write=" + w);'
+  fi
+}
+
+cmd_block() {
+  if [ "$MODE" != auto ]; then
+    cat <<'EOF'
+block needs auto mode. On the source primary run:
+  db.adminCommand({fsync: 1, lock: true})
+EOF
+    exit 2
+  fi
+  local src_comp sp out
+  src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
+  sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
+  [ -n "$sp" ] || die "no primary pod on source"
+  warn "the source primary is frozen: writes stall (applications see timeouts), reads keep working"
+  warn "keep the window short; if this process dies before unblock, run: db.adminCommand({fsyncUnlock: 1})"
+  if [ "$ASSUME_YES" -ne 1 ]; then
+    [ -t 0 ] || die "non-interactive session: add --yes to confirm"
+    printf 'Type yes to continue: ' >&2
+    read -r answer
+    [ "$answer" = "yes" ] || die "aborted"
+  fi
+  out="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$(block_probe_js block)")"
+  echo "$out" | tail -1
+  echo "$out" | grep -q "ok=1" && echo "$out" | grep -q "write=FROZEN" \
+    || die "source freeze did not engage (probe write succeeded or command failed)"
+  info "source primary is frozen; next: commit --yes (gate verifies the frozen oplog) -> switch app -> unblock"
+}
+
 cmd_unblock() {
   if [ "$MODE" != auto ]; then
     cat <<'EOF'
 unblock needs auto mode. On the source primary run:
-  db.adminCommand({setUserWriteBlockMode: 1, global: false})
+  db.adminCommand({fsyncUnlock: 1})
 EOF
     exit 2
   fi
-  local src_comp sp
+  local src_comp sp out
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
-  sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
+  sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
   [ -n "$sp" ] || die "no primary pod on source"
   warn "after unblocking, source and destination can diverge (the source holds stale data)"
   if [ "$ASSUME_YES" -ne 1 ]; then
@@ -814,9 +857,15 @@ EOF
     read -r answer
     [ "$answer" = "yes" ] || die "aborted"
   fi
-  mongosh_js "$SRC_NS" "$sp" "$src_comp" \
-    'print("setUserWriteBlockMode ok=" + db.adminCommand({setUserWriteBlockMode: 1, global: false}).ok)'
-  info "source cluster is writable again"
+  out="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$(block_probe_js unblock)")"
+  echo "$out" | tail -1
+  echo "$out" | grep -q "ok=1" && echo "$out" | grep -q "write=WRITABLE" \
+    || die "source is not writable after unblock (probe write failed)"
+  if echo "$out" | grep -q "lockCount=0"; then
+    info "source cluster is writable again"
+  else
+    warn "outer fsync lock(s) still held (lockCount>0); run unblock again or fsyncUnlock manually"
+  fi
 }
 
 cmd_teardown() {
@@ -895,6 +944,7 @@ case "$SUBCMD" in
   wait)       cmd_wait ;;
   verify)     cmd_verify ;;
   commit)     cmd_commit ;;
+  block)      cmd_block ;;
   unblock)    cmd_unblock ;;
   teardown)   cmd_teardown ;;
   rbac)       cmd_rbac ;;

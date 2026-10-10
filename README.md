@@ -67,7 +67,9 @@ CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd
 
 ## Commit semantics
 
-- Stop source writers BEFORE running `commit`. The gate verifies quiescence via the source oplog wherever the tool can reach the clusters (laptop auto mode and in-pod serviceAccount mode) and falls back to a strict all-zero lag gate in manual mode — mongosync 1.16 fatals if a write races its final verification, and a mid-commit death requires recreating the destination. `--force` overrides.
+- Recommended cutover: `block --yes` (freezes the source primary via fsync lock — writes stall, reads keep working, engagement verified by a probe write) -> `commit --yes` (the oplog gate sees a frozen source) -> switch the app to the destination -> `unblock --yes`. Blocking first makes the commit race structurally impossible: no user write can land while final verification runs.
+- `commit` also gates on a quiet source by itself (oplog quiescence over an 8s window wherever the tool can reach the clusters, strict all-zero lag in manual mode) — mongosync 1.16 fatals if a write races its final verification, and a mid-commit death requires recreating the destination. `--force` overrides.
+- Keep the freeze window short; if the tool dies while frozen, recover with `db.adminCommand({fsyncUnlock: 1})` on the source primary.
 - After `COMMITTED` the destination is writable and the source stays blocked until `unblock`.
 - Commit is final; reverse is only possible before commit.
 

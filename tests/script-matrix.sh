@@ -56,6 +56,7 @@ echo "== manual-mode gates =="
 URI_ARGS=(--source-uri mongodb://a --destination-uri mongodb://b)
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" verify;    rc_is 2 "t19 verify manual gate"; has "verify needs auto mode" "t19 hint"
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" unblock;   rc_is 2 "t20 unblock manual gate"; has "unblock needs auto mode" "t20 hint"
+run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" block;    rc_is 2 "t26 block manual gate"; has "block needs auto mode" "t26 hint"
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" rbac;      rc_is 1 "t21 rbac manual gate"; has "rbac requires auto mode" "t21 message"
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" check;     rc_is 1 "t22 check manual gate"; has "check requires auto mode" "t22 message"
 
@@ -126,7 +127,7 @@ mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":20}'
 : >"$TMP/posts"
-run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m11 commit refused while source not quiet"; has "source not quiet" "m11 message"
+run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m11 manual mode: nonzero lag refused"; has "manual mode: lag was not 0" "m11 message"
 [ -s "$TMP/posts" ] && bad "m11 no commit POST issued" || ok "m11 no commit POST issued"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":5}'
 : >"$TMP/posts"
