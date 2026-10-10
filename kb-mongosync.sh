@@ -50,6 +50,7 @@ CHART="oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync"
 CHART_VERSION=""
 CHART_DIR=""
 IMAGE=""
+SETOPT=()
 COMPONENT=""
 WAIT_TIMEOUT=1800
 ASSUME_YES=0
@@ -78,6 +79,7 @@ Options:
   --chart-version V       chart version (defaults to latest)
   --chart-dir PATH        use a local chart directory instead of --chart
   --image URI             override the tool image (repo:tag)
+  --set K=V               extra helm --set values for deploy (repeatable)
   --api-url URL           mongosync API endpoint, skips kubectl port-forward
   --port N                local port-forward start port (default 27180)
   --timeout SECS          wait/commit timeout (default 1800)
@@ -136,6 +138,7 @@ while [ $# -gt 0 ]; do
     --chart-version) need_value "$@"; CHART_VERSION="$2"; shift 2 ;;
     --chart-dir)     need_value "$@"; CHART_DIR="$2"; shift 2 ;;
     --image)         need_value "$@"; IMAGE="$2"; shift 2 ;;
+    --set)           need_value "$@"; SETOPT+=("$2"); shift 2 ;;
     --api-url)       need_value "$@"; API_URL="$2"; shift 2 ;;
     --port)          need_value "$@"; API_PORT="$2"; shift 2 ;;
     --timeout)       need_value "$@"; WAIT_TIMEOUT="$2"; shift 2 ;;
@@ -472,6 +475,7 @@ cmd_deploy() {
   local extra=() src_comp dst_comp
   [ -n "$IMAGE" ] && extra+=(--set-string "image.tag=${IMAGE##*:}")
   [ -n "$CHART_VERSION" ] && [ -z "$CHART_DIR" ] && extra+=(--version "$CHART_VERSION")
+  extra+=("${SETOPT[@]}")
 
   info "writing chart values (connection strings never logged)"
   if [ "$MODE" = manual ]; then
