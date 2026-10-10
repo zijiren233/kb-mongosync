@@ -1,0 +1,133 @@
+name: Tool image
+
+on:
+  push:
+    branches: ["**"]
+    tags:
+      - "v*"
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker-prepare:
+    name: Docker Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      meta-images: ${{ steps.meta-images.outputs.value }}
+      image-tag: ${{ steps.meta-images.outputs.image-tag }}
+      msver: ${{ steps.msver.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read mongosync version
+        id: msver
+        run: |
+          ver="$(tr -d '[:space:]' < VERSION)"
+          [ -n "$ver" ] || { echo "VERSION file is empty" >&2; exit 1; }
+          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify upstream tarballs exist for both architectures
+        env:
+          MSVER: ${{ steps.msver.outputs.version }}
+        run: |
+          set -eux
+          for art in ubuntu2204-x86_64 ubuntu2204-arm64; do
+            url="https://fastdl.mongodb.org/tools/mongosync/mongosync-${art}-${MSVER}.tgz"
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -r 0-0 "$url" || echo 000)"
+            [ "$code" = "206" ] || [ "$code" = "200" ] || {
+              echo "upstream tarball not reachable (HTTP ${code}): ${url}" >&2
+              exit 1
+            }
+          done
+
+      - name: Build image metadata inputs
+        id: meta-images
+        env:
+          GHCR_REPOSITORY: ${{ github.repository }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY || secrets.DOCKERHUB_REPOSITORY }}
+          DEFAULT_REPOSITORY_NAME: ${{ github.event.repository.name }}
+        run: |
+          image_tag="sha-${GITHUB_SHA::7}"
+          if [ -n "$DOCKERHUB_REPOSITORY" ]; then
+            case "$DOCKERHUB_REPOSITORY" in
+              */*)
+                dockerhub_repository="$DOCKERHUB_REPOSITORY"
+                ;;
+              *)
+                dockerhub_repository="$DOCKERHUB_USERNAME/$DOCKERHUB_REPOSITORY"
+                ;;
+            esac
+          elif [ -n "$DOCKERHUB_USERNAME" ]; then
+            dockerhub_repository="$DOCKERHUB_USERNAME/$DEFAULT_REPOSITORY_NAME"
+          fi
+          {
+            echo "image-tag=$image_tag"
+            echo 'value<<EOF'
+            echo "ghcr.io/$GHCR_REPOSITORY"
+            if [ -n "$dockerhub_repository" ]; then
+              echo "docker.io/$dockerhub_repository"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  docker-build:
+    name: Tool image build
+    needs: docker-prepare
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: docker/github-builder/.github/workflows/build.yml@v1
+    with:
+      runner: |
+        default=ubuntu-24.04
+        linux/arm=ubuntu-24.04-arm
+        linux/arm64=ubuntu-24.04-arm
+      distribute: true
+      platforms: linux/amd64,linux/arm64
+      output: ${{ github.event_name == 'push' && 'image' || 'local' }}
+      push: ${{ github.event_name == 'push' }}
+      build-args: |
+        MSVER=${{ needs.docker-prepare.outputs.msver }}
+      artifact-upload: false
+      sign: ${{ github.event_name == 'push' && 'auto' || 'false' }}
+      cache: true
+      cache-mode: max
+      cache-scope: kb-mongosync-image
+      sbom: true
+      set-meta-annotations: true
+      set-meta-labels: true
+      meta-labels: |
+        org.opencontainers.image.title=kb-mongosync tool image
+        org.opencontainers.image.description=mongosync bundled with the kb-mongosync runner for KubeBlocks MongoDB migrations
+      meta-annotations: |
+        org.opencontainers.image.title=kb-mongosync tool image
+        org.opencontainers.image.description=mongosync bundled with the kb-mongosync runner for KubeBlocks MongoDB migrations
+      meta-images: ${{ needs.docker-prepare.outputs.meta-images }}
+      meta-tags: |
+        type=ref,event=branch
+        type=ref,event=pr
+        type=ref,event=tag
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=raw,value=${{ needs.docker-prepare.outputs.image-tag }}
+        type=raw,value=mongosync-${{ needs.docker-prepare.outputs.msver }}
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        ${{ (vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME) != '' && format('- registry: docker.io
+          username: {0}
+          password: {1}', vars.DOCKERHUB_USERNAME || secrets.DOCKERHUB_USERNAME, secrets.DOCKERHUB_PASSWORD) || '' }}

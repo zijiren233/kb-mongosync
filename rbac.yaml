@@ -1,0 +1,45 @@
+# Least-privilege baseline for kb-mongosync (apply as-is, or generate a
+# strict version with concrete names via:
+#   ./kb-mongosync.sh --src-ns A --src-cluster X --dst-ns B --dst-cluster Y rbac > my-rbac.yaml
+#
+# clusters get/list             discover cluster, component, serviceVersion
+# pods CRUD + exec/portforward  deploy mongosync pod, probe via mongosh, port-forward
+# secrets get/create/delete      read <cluster>-<component>-account-root credentials;
+#                                create/delete the mongosync config Secret (holds
+#                                credentials, stays inside the cluster)
+# events get/list                troubleshooting
+# Cross-namespace migrations need the same Role in both namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kb-mongosync-operator
+  namespace: <namespace>
+rules:
+  - apiGroups: ["apps.kubeblocks.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kb-mongosync-operator
+  namespace: <namespace>
+subjects:
+  - kind: User
+    name: <kc-user>   # see: kubectl auth whoami
+roleRef:
+  kind: Role
+  name: kb-mongosync-operator
+  apiGroup: rbac.authorization.k8s.io
