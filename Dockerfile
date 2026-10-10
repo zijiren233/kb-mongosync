@@ -40,7 +40,9 @@ RUN set -eux; \
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY kb-mongosync.sh /usr/local/bin/kb-mongosync
-RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/kb-mongosync
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/kb-mongosync \
+ && mkdir -p /etc/mongosync \
+ && chown 10001 /etc/mongosync
 
 USER 10001
 EXPOSE 27180

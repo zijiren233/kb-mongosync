@@ -135,7 +135,7 @@ done
 # Only subcommands that touch KubeBlocks clusters or build chart values need a
 # full input mode; API-driving subcommands work standalone (also in-pod).
 case "$SUBCMD" in
-  check|deploy|verify|unblock|rbac)
+  check|deploy|verify|unblock|rbac|run)
     if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
       [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
       MODE=manual
@@ -150,7 +150,7 @@ case "$SUBCMD" in
 esac
 [ -n "$RELEASE" ] || RELEASE="$([ "${MODE:-}" = auto ] && printf 'msync-%s-to-%s' "$SRC_CLUSTER" "$DST_CLUSTER" || echo msync-manual)"
 case "$SUBCMD" in
-  deploy|teardown)
+  deploy|teardown|run)
     if [ -z "$NAMESPACE" ]; then
       [ "${MODE:-}" = auto ] && NAMESPACE="$SRC_NS" || die "manual mode needs --namespace"
     fi
