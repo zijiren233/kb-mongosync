@@ -14,7 +14,7 @@ LABEL org.opencontainers.image.title="kb-mongosync tool image" \
       org.opencontainers.image.description="mongosync (MongoDB Cluster-to-Cluster Sync) bundled with the kb-mongosync runner"
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl python3 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
