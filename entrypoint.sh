@@ -18,6 +18,5 @@ if [ -n "${KUBERNETES_SERVICE_HOST:-}" ] && [ -d "$SA_DIR" ] && [ -z "${KUBECONF
   kubectl config use-context in-cluster >/dev/null
 fi
 
-export KBMS_API_URL="http://127.0.0.1:${KBMS_PORT:-27180}"
 kb-mongosync render-conf > "$CONF"
 exec mongosync --config "$CONF" --acceptDisclaimer
