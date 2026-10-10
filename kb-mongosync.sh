@@ -24,6 +24,7 @@ cleanup() {
   local rc=$?
   if [ -n "$PF_PID" ]; then
     kill "$PF_PID" 2>/dev/null || true
+    wait "$PF_PID" 2>/dev/null || true
     PF_PID=""
   fi
   rm -rf "$KB_TMP"
@@ -292,7 +293,9 @@ pf_up() {
   p="$API_PORT"
   while [ $tried -lt 10 ]; do
     if ! command -v nc >/dev/null 2>&1 || ! nc -z 127.0.0.1 "$p" 2>/dev/null; then
-      kc port-forward --address 127.0.0.1 -n "$NAMESPACE" pod/"$pod" "${p}:27180" \
+      # background kubectl directly: through the kc() wrapper $! would be the
+      # subshell pid and killing it would orphan the kubectl child
+      kubectl port-forward --address 127.0.0.1 -n "$NAMESPACE" pod/"$pod" "${p}:27180" \
         >/dev/null 2>"$KB_TMP/pf.err" &
       PF_PID=$!
       for i in 1 2 3 4 5 6 7 8 9 10; do
