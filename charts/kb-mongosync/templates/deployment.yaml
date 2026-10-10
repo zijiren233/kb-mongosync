@@ -31,16 +31,16 @@ spec:
           ports:
             - name: api
               containerPort: {{ .Values.port }}
+          # mongosync binds its API to localhost only, so probes must exec
+          # inside the container instead of using httpGet against the pod IP.
           readinessProbe:
-            httpGet:
-              path: /api/v1/progress
-              port: api
+            exec:
+              command: ["/bin/sh", "-c", "curl -sf http://127.0.0.1:{{ .Values.port }}/api/v1/progress >/dev/null"]
             periodSeconds: 5
             failureThreshold: 360
           livenessProbe:
-            httpGet:
-              path: /api/v1/progress
-              port: api
+            exec:
+              command: ["/bin/sh", "-c", "curl -sf http://127.0.0.1:{{ .Values.port }}/api/v1/progress >/dev/null"]
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 10

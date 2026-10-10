@@ -375,7 +375,7 @@ cmd_deploy() {
     --timeout 3m "${extra[@]}" \
     || die "helm install failed"
   if [ "$MODE" = auto ]; then
-    kc wait "pod -l app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
+    kc wait pod -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
       -n "$NAMESPACE" --for=condition=Ready --timeout=180s >/dev/null 2>&1 \
       || info "pod Running (mongosync starts once configure provides the config Secret)"
   fi
@@ -419,7 +419,7 @@ EOF
       --from-file=conf.json="$KB_TMP/conf.json" >/dev/null || die "failed to create config Secret"
   fi
   if [ "$MODE" = auto ]; then
-    kc wait "pod -l app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
+    kc wait pod -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
       -n "$NAMESPACE" --for=condition=Ready --timeout=300s >/dev/null \
       || die "mongosync pod not Ready after configure"
   fi

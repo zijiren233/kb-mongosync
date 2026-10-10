@@ -40,7 +40,7 @@ No kubectl discovery: provide both endpoints yourself. `deploy` installs the cha
 
 ## Chart
 
-`charts/kb-mongosync` installs the workload only: Deployment (recreate strategy, readiness on `/api/v1/progress`, 2Gi limit), Service, and optional ServiceAccount/RBAC (`serviceAccount.create`, `rbac.create`). Connection config is not a chart value: the container entrypoint waits for the Secret `<release>-conf` (key `conf.json`), which `configure` creates outside Helm; the pod restarts automatically when the config changes. Published on tags as `oci://ghcr.io/zijiren233/kb-mongosync`.
+`charts/kb-mongosync` installs the workload only: Deployment (recreate strategy, localhost exec probes, 2Gi limit) and optional ServiceAccount/RBAC (`serviceAccount.create`, `rbac.create`). Connection config is not a chart value: the container entrypoint waits for the Secret `<release>-conf` (key `conf.json`), which `configure` creates outside Helm; the pod restarts automatically when the config changes. Published on tags as `oci://ghcr.io/zijiren233/kb-mongosync`.
 
 ## mongosync version
 
