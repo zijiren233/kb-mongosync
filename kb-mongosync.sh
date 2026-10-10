@@ -163,7 +163,7 @@ esac
 if [ "${MODE:-}" = auto ]; then
   command -v kubectl >/dev/null 2>&1 || die "missing dependency: kubectl"
 fi
-if [ "$KCFG_GIVEN" -eq 1 ] || [ -z "${KUBECONFIG:-}" ]; then
+if [ "${KCFG_GIVEN:-0}" -eq 1 ] || [ -z "${KUBECONFIG:-}" ]; then
   [ -f "$KCTL_CFG" ] || die "kubeconfig not found: $KCTL_CFG"
   export KUBECONFIG="$KCTL_CFG"
 fi
