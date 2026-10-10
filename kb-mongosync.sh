@@ -765,9 +765,15 @@ EOF
     [ "$answer" = "yes" ] || die "aborted"
   fi
   info "POST /api/v1/commit"
+  # the commit response body may come back empty (observed with a frozen
+  # source); the state poll below is the source of truth either way
   api_post /api/v1/commit '{ }' | python3 -c '
 import json,sys
-d=json.load(sys.stdin)
+raw=sys.stdin.read()
+try:
+    d=json.loads(raw)
+except Exception:
+    print("[commit] response unreadable; falling back to state polling", file=sys.stderr); sys.exit(0)
 if not d.get("success"):
     print("[commit] FAILED:", d.get("error"), d.get("errorDescription",""), file=sys.stderr); sys.exit(1)
 print("[commit] accepted, waiting for COMMITTED ...")' || die "commit request rejected"

@@ -95,6 +95,7 @@ class H(http.server.BaseHTTPRequestHandler):
             s=self._state(); s["state"]="RUNNING"; self._save(s)
         elif self.path=="/api/v1/commit":
             self._save({"state":"COMMITTED","canCommit":False,"canWrite":True,"lagTimeSeconds":0})
+            self.send_response(200); self.end_headers(); self.wfile.flush(); return
         self._send(200, {"success": True})
     def log_message(self,*a): pass
 http.server.ThreadingHTTPServer(("127.0.0.1",18100),H).serve_forever()
