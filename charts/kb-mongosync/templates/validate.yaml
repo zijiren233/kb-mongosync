@@ -3,7 +3,7 @@
 {{- end }}
 {{- range $name, $uri := dict "source.uri" .Values.source.uri "destination.uri" .Values.destination.uri }}
 {{- if and $uri (not (or (hasPrefix "mongodb://" $uri) (hasPrefix "mongodb+srv://" $uri))) }}
-{{- fail (printf "%s must start with mongodb:// (got %s)" $name $uri) }}
+{{- fail (printf "%s must start with mongodb:// (got %q...)" $name (substr 0 10 $uri)) }}
 {{- end }}
 {{- end }}
 {{- if and (not .Values.source.uri) (or (not .Values.source.namespace) (not .Values.source.cluster) (not .Values.destination.namespace) (not .Values.destination.cluster)) }}

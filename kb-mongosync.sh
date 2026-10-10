@@ -115,7 +115,7 @@ validate_uri() { # flag-name value; catches the misconfigurations that would
   local name="$1" val="$2"
   case "$val" in
     mongodb://*|mongodb+srv://*) : ;;
-    *) die "$name must start with mongodb:// (got: ${val%%@*}@...)" ;;
+    *) die "$name must start with mongodb:// (value withheld)" ;;
   esac
   printf '%s' "$val" | LC_ALL=C grep -qE '^[[:print:]]+$' \
     || die "$name contains non-printable characters"
@@ -383,7 +383,6 @@ cmd_check() {
   dst_phase="$(cluster_phase "$DST_NS" "$DST_CLUSTER")"
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
   dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
-  COMPONENT="$src_comp"
 
   [ "$src_phase" = "Running" ] || { warn "source cluster phase=$src_phase (need Running)"; fail=1; }
   [ "$dst_phase" = "Running" ] || { warn "destination cluster phase=$dst_phase (need Running)"; fail=1; }
@@ -413,7 +412,7 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
   esac
   info "note: mongosync 1.17+ requires source >= 6.0.24; use 1.16.0 for older 6.0.x sources"
 
-  src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
+  src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
   if [ -z "$src_primary" ]; then
     warn "no primary pod found on source cluster"
     fail=1
@@ -443,7 +442,7 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
     fi
   fi
 
-  dst_primary="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
+  dst_primary="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
   if [ -z "$dst_primary" ]; then
     warn "no primary pod found on destination cluster"
     fail=1
@@ -466,10 +465,16 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
     fi
   fi
 
-  build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp" >/dev/null \
-    && info "source credentials ok" || { warn "failed to read source credentials"; fail=1; }
-  build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp" >/dev/null \
-    && info "destination credentials ok" || { warn "failed to read destination credentials"; fail=1; }
+  if build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp" >/dev/null 2>&1; then
+    info "source credentials ok"
+  else
+    warn "failed to read source credentials"; fail=1
+  fi
+  if build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp" >/dev/null 2>&1; then
+    info "destination credentials ok"
+  else
+    warn "failed to read destination credentials"; fail=1
+  fi
 
   [ "$fail" -eq 0 ] && info "check passed" || die "check failed (see warnings above)"
 }
@@ -634,8 +639,8 @@ EOF
   else
     warn "release pod not found, skipping lag check (offline comparison)"
   fi
-  sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
-  dp="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
+  sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
+  dp="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
   [ -n "$sp" ] || die "no primary pod on source"
   [ -n "$dp" ] || die "no primary pod on destination"
   local js='
