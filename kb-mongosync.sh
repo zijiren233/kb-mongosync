@@ -44,35 +44,36 @@ WAIT_FOR="copy"
 
 usage() {
   cat <<'EOF'
-kb-mongosync —— KubeBlocks MongoDB 集群间 mongosync 迁移驱动器
+kb-mongosync: migrate MongoDB clusters managed by KubeBlocks via mongosync
 
-全局参数:
-  --kubeconfig PATH       kubeconfig（默认 $KUBECONFIG 或 ~/.kube/config）
-  --image URI             工具镜像（deploy 必填，例如 ghcr.io/zijiren233/kb-mongosync:mongosync-1.16.0）
-  --src-ns NS             源集群 namespace
-  --src-cluster NAME      源集群名
-  --dst-ns NS             目标集群 namespace
-  --dst-cluster NAME      目标集群名
-  --component NAME        覆盖自动发现的 component 名（默认 cluster 第一个 component）
-  --name NAME             mongosync pod 名（默认 msync-<src>-to-<dst>）
-  --port N                本地 API 端口起点（默认 27180，被占用时自动 +1）
-  --timeout SECS          wait/commit 超时（默认 1800）
-  --yes                   跳过交互确认（非交互环境必须）
-  --force                 deploy 时允许替换已存在但配置不同的 pod
-  -h | --help             本帮助
+Options:
+  --kubeconfig PATH       kubeconfig (default $KUBECONFIG or ~/.kube/config)
+  --image URI             tool image, required by deploy
+  --src-ns NS             source namespace
+  --src-cluster NAME      source cluster name
+  --dst-ns NS             destination namespace
+  --dst-cluster NAME      destination cluster name
+  --component NAME        override discovered component (default: first component)
+  --name NAME             mongosync pod name (default msync-<src>-to-<dst>)
+  --port N                local API port start (default 27180, auto-increments when busy)
+  --timeout SECS          wait/commit timeout (default 1800)
+  --for COND              wait condition: copy|lag|can-commit|committed
+  --yes                   assume yes (required in non-interactive sessions)
+  --force                 deploy: replace a pod running a different image
+  -h | --help             show this help
 
-子命令（均可安全重复执行）:
-  check     前置检查：集群 Running、版本、凭证、目标端空库
-  deploy    部署/更新 mongosync pod 与配置 Secret（镜像方式，无需注入二进制）
-  start     发起同步（已 RUNNING/COMMITTED 则跳过）
-  status    输出同步状态摘要
-  wait      等待条件：--for copy|lag|can-commit|committed
-  verify    双端 counts + dbHash 一致性校验（建议 lag=0 后执行）
-  commit    提交迁移：源端自动进入写阻塞 → COMMITTED → 目标端可写
-  unblock   解除源端写阻塞（commit 后需要继续使用源集群时才执行）
-  teardown  删除 mongosync pod 与配置 Secret
-  rbac      打印本次迁移所需的最小权限 Role/RoleBinding（严格模式）
-  run       check → deploy → start → wait copy → status
+Subcommands:
+  check     preflight: clusters Running, versions, credentials, empty destination
+  deploy    deploy the mongosync pod and config Secret
+  start     start the sync
+  status    show sync state
+  wait      wait for a condition (--for)
+  verify    compare counts and dbHash on both sides
+  commit    commit the migration (source write-blocked, then COMMITTED)
+  unblock   re-enable writes on the source
+  teardown  delete the mongosync pod and config Secret
+  rbac      print least-privilege Role/RoleBinding
+  run       check, deploy, start, wait for copy, status
 EOF
 }
 
@@ -287,7 +288,7 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
     bad-dst)  warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
     *)        warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
   esac
-  info "note: src 6.0.20 + dst 8.0.4 => max usable mongosync is 1.16.0 (1.17+ needs src >= 6.0.24)"
+  info "note: mongosync 1.17+ requires source >= 6.0.24; use 1.16.0 for older 6.0.x sources"
 
   dst_primary="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
   if [ -z "$dst_primary" ]; then
