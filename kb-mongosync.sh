@@ -55,6 +55,7 @@ COMPONENT=""
 WAIT_TIMEOUT=1800
 ASSUME_YES=0
 FORCE=0
+WB_OFF=0
 
 SUBCMD=""
 WAIT_FOR="copy"
@@ -87,6 +88,8 @@ Options:
   --for COND              wait condition: copy|lag|can-commit|committed
   --yes                   assume yes (required in non-interactive sessions)
   --force                 allow commit even if the source is not quiet
+  --no-write-blocking     start without enableUserWriteBlocking (mongosync
+                          then never blocks source writes during commit)
   -h | --help             show this help
 
 Subcommands:
@@ -148,6 +151,7 @@ while [ $# -gt 0 ]; do
     --for)           need_value "$@"; WAIT_FOR="$2"; shift 2 ;;
     --yes|-y)        ASSUME_YES=1; shift ;;
     --force)         FORCE=1; shift ;;
+    --no-write-blocking) WB_OFF=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     -*)              die "unknown option: $1 (see --help)" ;;
     *)               [ -z "$SUBCMD" ] || die "only one subcommand allowed: '$SUBCMD' and '$1'"
@@ -556,7 +560,7 @@ cmd_render_conf() {
 }
 
 cmd_start() {
-  local state resp
+  local state resp body
   pf_up
   state="$(progress_field state)"
   case "$state" in
@@ -567,8 +571,13 @@ cmd_start() {
       warn "state=$state (not IDLE), refusing to start; inspect with status"
       return 1 ;;
   esac
-  info "POST /api/v1/start {source: cluster0 -> destination: cluster1}"
-  resp="$(api_post /api/v1/start '{"source":"cluster0","destination":"cluster1"}')"
+  if [ "$WB_OFF" -eq 1 ]; then
+    body='{"source":"cluster0","destination":"cluster1"}'
+  else
+    body='{"source":"cluster0","destination":"cluster1","enableUserWriteBlocking":true}'
+  fi
+  info "POST /api/v1/start {source: cluster0 -> destination: cluster1, enableUserWriteBlocking: $([ "$WB_OFF" -eq 1 ] && echo false || echo true)}"
+  resp="$(api_post /api/v1/start "$body")"
   printf '%s' "$resp" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -806,14 +815,19 @@ block_probe_js() { # "block" or "unblock"
       print("ok=" + r.ok + " lockCount=" + r.lockCount + " write=" + w);'
   else
     printf '
-      const r = db.adminCommand({fsyncUnlock: 1});
+      const r1 = db.adminCommand({setUserWriteBlockMode: 1, global: false});
+      let fs = "skipped";
+      try {
+        const r2 = db.adminCommand({fsyncUnlock: 1});
+        fs = "ok:" + r2.ok + " lockCount:" + (r2.lockCount === undefined ? "-" : r2.lockCount);
+      } catch (e) { fs = "not-locked"; }
       let w = "?";
       try {
         db.getSiblingDB("kbms_probe").probe.insertOne({t: new Date()});
         w = "WRITABLE";
         db.getSiblingDB("kbms_probe").dropDatabase();
       } catch (e) { w = "BLOCKED(" + e.codeName + ")"; }
-      print("ok=" + r.ok + " lockCount=" + r.lockCount + " write=" + w);'
+      print("uwb=" + r1.ok + " fsyncUnlock=" + fs + " write=" + w);'
   fi
 }
 
@@ -865,9 +879,11 @@ EOF
   fi
   out="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$(block_probe_js unblock)")"
   echo "$out" | tail -1
-  echo "$out" | grep -q "ok=1" && echo "$out" | grep -q "write=WRITABLE" \
+  echo "$out" | grep -q "write=WRITABLE" \
     || die "source is not writable after unblock (probe write failed)"
-  if echo "$out" | grep -q "lockCount=0"; then
+  if echo "$out" | grep -q "fsyncUnlock=not-locked"; then
+    info "user write block released; no fsync lock was held"
+  elif echo "$out" | grep -q "lockCount=0"; then
     info "source cluster is writable again"
   else
     warn "outer fsync lock(s) still held (lockCount>0); run unblock again or fsyncUnlock manually"
