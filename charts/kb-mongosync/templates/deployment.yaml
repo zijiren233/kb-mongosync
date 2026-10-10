@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kb-mongosync.fullname" . }}
+  labels:
+    {{- include "kb-mongosync.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "kb-mongosync.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "kb-mongosync.labels" . | nindent 8 }}
+    spec:
+      {{- with .Values.serviceAccount }}
+      {{- if and .create .name }}
+      serviceAccountName: {{ .name }}
+      {{- else if .create }}
+      serviceAccountName: {{ include "kb-mongosync.fullname" $ }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: mongosync
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion | default "latest" }}"
+          imagePullPolicy: Always
+          ports:
+            - name: api
+              containerPort: {{ .Values.port }}
+          readinessProbe:
+            httpGet:
+              path: /api/v1/progress
+              port: api
+            periodSeconds: 5
+            failureThreshold: 360
+          livenessProbe:
+            httpGet:
+              path: /api/v1/progress
+              port: api
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/mongosync
+              readOnly: true
+      volumes:
+        # The config Secret is created outside Helm by kb-mongosync.sh with the
+        # conventional name <release>-conf; the entrypoint waits for it.
+        - name: conf
+          secret:
+            secretName: {{ .Release.Name }}-conf
+            optional: true

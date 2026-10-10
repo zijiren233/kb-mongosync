@@ -1,0 +1,37 @@
+name: Helm chart
+
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  helm-release:
+    name: Helm release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Package and push chart to ghcr.io
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -eux
+          VERSION="${RELEASE_TAG#v}"
+          WORK="$(mktemp -d)"
+          cp -r charts/kb-mongosync "$WORK/kb-mongosync"
+          sed -i "s/^version: .*/version: ${VERSION}/" "$WORK/kb-mongosync/Chart.yaml"
+          helm lint "$WORK/kb-mongosync"
+          helm package "$WORK/kb-mongosync" -d "$WORK"
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+          helm push "$WORK/kb-mongosync-${VERSION}.tgz" "oci://ghcr.io/${{ github.repository }}"

@@ -1,0 +1,26 @@
+image:
+  repository: ghcr.io/zijiren233/kb-mongosync
+  tag: "mongosync-1.16.0"
+
+nameOverride: ""
+
+serviceAccount:
+  create: false
+  name: ""
+
+rbac:
+  create: false
+  rules:
+    - apiGroups: [""]
+      resources: ["pods", "services", "secrets"]
+      verbs: ["get", "list", "watch"]
+
+port: 27180
+
+resources:
+  limits:
+    cpu: "1"
+    memory: 2Gi
+  requests:
+    cpu: 200m
+    memory: 512Mi

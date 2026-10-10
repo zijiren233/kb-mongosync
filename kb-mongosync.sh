@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# kb-mongosync: drive mongosync to migrate MongoDB clusters managed by KubeBlocks.
-# Every subcommand is idempotent; all state is derived from the cluster on each
-# invocation, so any step can be safely retried or resumed.
+# kb-mongosync: drive mongosync to migrate MongoDB clusters.
+# Deployment is done with the kb-mongosync Helm chart; this script only
+# prepares values, installs, and drives the mongosync HTTP API.
+#
+# Two input modes:
+#   auto   --src-ns/--src-cluster/--dst-ns/--dst-cluster; connection strings
+#            are discovered from KubeBlocks resources via kubectl
+#   manual --source-uri/--destination-uri; no kubectl discovery at all, and
+#            --api-url drives an existing release without kubectl
 set -Eeuo pipefail
 
 log()  { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -24,56 +30,70 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for _c in kubectl python3 curl nc; do
+for _c in curl python3; do
   command -v "$_c" >/dev/null 2>&1 || die "missing dependency: $_c"
 done
 
 KCTL_CFG="${KUBECONFIG:-$HOME/.kube/config}"
-IMAGE=""
+SRC_URI=""
+DST_URI=""
 SRC_NS="";  SRC_CLUSTER=""
 DST_NS="";  DST_CLUSTER=""
-COMPONENT=""
-NAME=""
+NAMESPACE=""
+RELEASE=""
+API_URL=""
 API_PORT=27180
+CHART="oci://ghcr.io/zijiren233/kb-mongosync"
+CHART_VERSION=""
+CHART_DIR=""
+IMAGE=""
+COMPONENT=""
 WAIT_TIMEOUT=1800
 ASSUME_YES=0
-FORCE=0
 
 SUBCMD=""
 WAIT_FOR="copy"
+MODE=""
 
 usage() {
   cat <<'EOF'
-kb-mongosync: migrate MongoDB clusters managed by KubeBlocks via mongosync
+kb-mongosync: migrate MongoDB clusters via mongosync (Helm-deployed)
+
+Input mode (choose one):
+  auto:   --src-ns NS --src-cluster NAME --dst-ns NS --dst-cluster NAME
+          connection strings are discovered from KubeBlocks via kubectl
+  manual: --source-uri URI --destination-uri URI
+          no kubectl discovery; pair with --api-url to drive an existing
+          release, or with --namespace/-chart options to install one
 
 Options:
-  --kubeconfig PATH       kubeconfig (default $KUBECONFIG or ~/.kube/config)
-  --image URI             tool image, required by deploy
-  --src-ns NS             source namespace
-  --src-cluster NAME      source cluster name
-  --dst-ns NS             destination namespace
-  --dst-cluster NAME      destination cluster name
-  --component NAME        override discovered component (default: first component)
-  --name NAME             mongosync pod name (default msync-<src>-to-<dst>)
-  --port N                local API port start (default 27180, auto-increments when busy)
+  --kubeconfig PATH       kubeconfig for kubectl/helm (default $KUBECONFIG)
+  --namespace NS          release namespace (default: source namespace in auto mode)
+  --release NAME          helm release name (default msync-<src>-to-<dst>, or msync-manual)
+  --chart URI             chart reference (default oci://ghcr.io/zijiren233/kb-mongosync)
+  --chart-version V       chart version (defaults to latest)
+  --chart-dir PATH        use a local chart directory instead of --chart
+  --image URI             override the tool image (repo:tag)
+  --api-url URL           mongosync API endpoint, skips kubectl port-forward
+  --port N                local port-forward start port (default 27180)
   --timeout SECS          wait/commit timeout (default 1800)
   --for COND              wait condition: copy|lag|can-commit|committed
   --yes                   assume yes (required in non-interactive sessions)
-  --force                 deploy: replace a pod running a different image
   -h | --help             show this help
 
 Subcommands:
-  check     preflight: clusters Running, versions, credentials, empty destination
-  deploy    deploy the mongosync pod and config Secret
+  check     preflight (auto mode only: clusters, versions, credentials, empty destination)
+  deploy    helm upgrade --install of the chart (workload only, no config)
+  configure create or update the config Secret; restarts the pod on change
   start     start the sync
   status    show sync state
   wait      wait for a condition (--for)
-  verify    compare counts and dbHash on both sides
+  verify    compare counts and dbHash on both sides (auto mode)
   commit    commit the migration (source write-blocked, then COMMITTED)
-  unblock   re-enable writes on the source
-  teardown  delete the mongosync pod and config Secret
+  unblock   re-enable writes on the source (auto mode)
+  teardown  helm uninstall the release and delete the config Secret
   rbac      print least-privilege Role/RoleBinding
-  run       check, deploy, start, wait for copy, status
+  run       check, deploy, configure, start, wait for copy, status
 EOF
 }
 
@@ -81,48 +101,62 @@ need_value() { [ $# -ge 2 ] || die "option $1 requires a value"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --kubeconfig)   need_value "$@"; KCTL_CFG="$2"; shift 2 ;;
-    --image)        need_value "$@"; IMAGE="$2"; shift 2 ;;
-    --src-ns)       need_value "$@"; SRC_NS="$2"; shift 2 ;;
-    --src-cluster)  need_value "$@"; SRC_CLUSTER="$2"; shift 2 ;;
-    --dst-ns)       need_value "$@"; DST_NS="$2"; shift 2 ;;
-    --dst-cluster)  need_value "$@"; DST_CLUSTER="$2"; shift 2 ;;
-    --component)    need_value "$@"; COMPONENT="$2"; shift 2 ;;
-    --name)         need_value "$@"; NAME="$2"; shift 2 ;;
-    --port)         need_value "$@"; API_PORT="$2"; shift 2 ;;
-    --timeout)      need_value "$@"; WAIT_TIMEOUT="$2"; shift 2 ;;
-    --for)          need_value "$@"; WAIT_FOR="$2"; shift 2 ;;
-    --yes|-y)       ASSUME_YES=1; shift ;;
-    --force)        FORCE=1; shift ;;
-    -h|--help)      usage; exit 0 ;;
-    -*)             die "unknown option: $1 (see --help)" ;;
-    *)              [ -z "$SUBCMD" ] || die "only one subcommand allowed: '$SUBCMD' and '$1'"
-                    SUBCMD="$1"; shift ;;
+    --kubeconfig)    need_value "$@"; KCTL_CFG="$2"; shift 2 ;;
+    --source-uri)    need_value "$@"; SRC_URI="$2"; shift 2 ;;
+    --destination-uri) need_value "$@"; DST_URI="$2"; shift 2 ;;
+    --src-ns)        need_value "$@"; SRC_NS="$2"; shift 2 ;;
+    --src-cluster)   need_value "$@"; SRC_CLUSTER="$2"; shift 2 ;;
+    --dst-ns)        need_value "$@"; DST_NS="$2"; shift 2 ;;
+    --dst-cluster)   need_value "$@"; DST_CLUSTER="$2"; shift 2 ;;
+    --namespace|-n)  need_value "$@"; NAMESPACE="$2"; shift 2 ;;
+    --release)       need_value "$@"; RELEASE="$2"; shift 2 ;;
+    --chart)         need_value "$@"; CHART="$2"; shift 2 ;;
+    --chart-version) need_value "$@"; CHART_VERSION="$2"; shift 2 ;;
+    --chart-dir)     need_value "$@"; CHART_DIR="$2"; shift 2 ;;
+    --image)         need_value "$@"; IMAGE="$2"; shift 2 ;;
+    --api-url)       need_value "$@"; API_URL="$2"; shift 2 ;;
+    --port)          need_value "$@"; API_PORT="$2"; shift 2 ;;
+    --timeout)       need_value "$@"; WAIT_TIMEOUT="$2"; shift 2 ;;
+    --for)           need_value "$@"; WAIT_FOR="$2"; shift 2 ;;
+    --yes|-y)        ASSUME_YES=1; shift ;;
+    -h|--help)       usage; exit 0 ;;
+    -*)              die "unknown option: $1 (see --help)" ;;
+    *)               [ -z "$SUBCMD" ] || die "only one subcommand allowed: '$SUBCMD' and '$1'"
+                     SUBCMD="$1"; shift ;;
   esac
 done
 
 [ -n "$SUBCMD" ] || { usage; exit 1; }
-[ -f "$KCTL_CFG" ] || die "kubeconfig not found: $KCTL_CFG"
-export KUBECONFIG="$KCTL_CFG"
 
-kc() { kubectl "$@"; }
-
-# Run a read-only probe; empty output on failure instead of aborting.
-kc_never_fails() { "$@" 2>/dev/null || true; }
-
-require_migration_args() {
-  [ -n "$SRC_NS" ]     || die "missing --src-ns"
+if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
+  [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
+  [ -z "$SRC_CLUSTER" ] && [ -z "$DST_CLUSTER" ] || die "manual mode conflicts with --src-cluster/--dst-cluster"
+  MODE=manual
+else
+  [ -n "$SRC_NS" ]     || die "missing --src-ns (or use --source-uri manual mode)"
   [ -n "$SRC_CLUSTER" ]|| die "missing --src-cluster"
   [ -n "$DST_NS" ]     || die "missing --dst-ns"
   [ -n "$DST_CLUSTER" ]|| die "missing --dst-cluster"
-  [ -n "$NAME" ] || NAME="msync-${SRC_CLUSTER}-to-${DST_CLUSTER}"
-  case "$SUBCMD" in deploy) [ -n "$IMAGE" ] || die "deploy requires --image";; esac
-}
+  MODE=auto
+fi
+[ -n "$RELEASE" ] || RELEASE="$([ "$MODE" = auto ] && printf 'msync-%s-to-%s' "$SRC_CLUSTER" "$DST_CLUSTER" || echo msync-manual)"
+[ -n "$NAMESPACE" ] || { [ "$MODE" = auto ] && NAMESPACE="$SRC_NS" || die "manual mode needs --namespace"; }
+
+command -v kubectl >/dev/null 2>&1 || [ "$MODE" = manual ] || die "missing dependency: kubectl"
+command -v helm >/dev/null 2>&1 || die "missing dependency: helm"
+
+if [ "$MODE" = auto ]; then
+  [ -f "$KCTL_CFG" ] || die "kubeconfig not found: $KCTL_CFG"
+  export KUBECONFIG="$KCTL_CFG"
+fi
+
+kc() { kubectl "$@"; }
+kc_never_fails() { "$@" 2>/dev/null || true; }
 
 load_cluster() { # ns name
   local out
   if ! out="$(kc get cluster "$2" -n "$1" -o json 2>/dev/null)"; then
-    die "cluster $1/$2 not found or access denied (check KB / RBAC)"
+    die "cluster $1/$2 not found or access denied"
   fi
   printf '%s' "$out"
 }
@@ -143,7 +177,7 @@ print(d["spec"]["componentSpecs"][0]["name"])'
   fi
 }
 
-component_pods() { # ns cluster component -> Running pods sorted by ordinal
+component_pods() { # ns cluster component
   kc_never_fails kc get pods -n "$1" -o json | python3 -c '
 import json,sys
 cluster, comp = sys.argv[1], sys.argv[2]
@@ -171,7 +205,7 @@ find_primary_pod() { # ns cluster component
   return 1
 }
 
-# JS is piped via stdin so credentials stay in pod env and no quoting leaks.
+# JS travels via stdin so credentials stay in pod env and no quoting leaks.
 mongosh_js() { # ns pod component js
   printf '%s' "$4" | kc exec -i "$2" -n "$1" -c "$3" -- \
     sh -c 'mongosh --quiet -u "$MONGODB_ROOT_USER" -p "$MONGODB_ROOT_PASSWORD" --authenticationDatabase admin --eval "$(cat)"' \
@@ -184,7 +218,7 @@ read_secret() { # ns secret key
 
 uri_safe() { echo "$1" | grep -qE '^[A-Za-z0-9._~-]+$'; }
 
-build_uri() { # ns cluster component -> mongodb://user:pass@seed1,seed2.../?replicaSet=rs
+build_uri() { # ns cluster component
   local ns="$1" cluster="$2" comp="$3" u p seeds rs pod fqdn
   rs="${cluster}-${comp}"
   u="$(read_secret "$ns" "${rs}-account-root" username)"
@@ -202,21 +236,32 @@ build_uri() { # ns cluster component -> mongodb://user:pass@seed1,seed2.../?repl
   printf 'mongodb://%s:%s@%s/?replicaSet=%s' "$u" "$p" "$seeds" "$rs"
 }
 
-PF_LOCAL_PORT=""
+# mongosync API access: --api-url directly, or kubectl port-forward to the release pod.
+API_BASE=""
+
+release_pod() {
+  kc_never_fails kc get pods -n "$NAMESPACE" -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
+    -o jsonpath='{.items[0].metadata.name}'
+}
 
 pf_up() {
-  [ -n "$PF_LOCAL_PORT" ] && return 0
-  local p="$API_PORT" tried=0 i
+  [ -n "$API_BASE" ] && return 0
+  if [ -n "$API_URL" ]; then API_BASE="$API_URL"; return 0; fi
+  [ "$MODE" = auto ] || die "manual mode needs --api-url to reach the API"
+  local pod p tried=0 i
+  pod="$(release_pod)"
+  [ -n "$pod" ] || die "no pod found for release $NAMESPACE/$RELEASE (run deploy first)"
+  p="$API_PORT"
   while [ $tried -lt 10 ]; do
-    if ! nc -z 127.0.0.1 "$p" 2>/dev/null; then
-      kc port-forward --address 127.0.0.1 -n "$SRC_NS" pod/"$NAME" "${p}:27180" \
+    if ! command -v nc >/dev/null 2>&1 || ! nc -z 127.0.0.1 "$p" 2>/dev/null; then
+      kc port-forward --address 127.0.0.1 -n "$NAMESPACE" pod/"$pod" "${p}:27180" \
         >/dev/null 2>"$KB_TMP/pf.err" &
       PF_PID=$!
       for i in 1 2 3 4 5 6 7 8 9 10; do
         sleep 1
         if curl -s --max-time 3 "http://127.0.0.1:${p}/api/v1/progress" >/dev/null 2>&1; then
-          PF_LOCAL_PORT="$p"
-          info "port-forward ready: 127.0.0.1:${p} -> ${SRC_NS}/${NAME}:27180"
+          API_BASE="http://127.0.0.1:${p}"
+          info "port-forward ready: ${API_BASE} -> ${NAMESPACE}/${pod}:27180"
           return 0
         fi
         kill -0 "$PF_PID" 2>/dev/null || break
@@ -226,19 +271,17 @@ pf_up() {
     fi
     p=$((p+1)); tried=$((tried+1))
   done
-  die "port-forward failed (pod not ready or all ports busy); check: kubectl logs -n $SRC_NS $NAME"
+  die "port-forward failed; check kubectl get pod -n $NAMESPACE -l app.kubernetes.io/instance=${RELEASE}"
 }
 
 api_get_progress() {
   pf_up
-  curl -s --max-time 15 "http://127.0.0.1:${PF_LOCAL_PORT}/api/v1/progress" \
-    || die "GET /api/v1/progress failed"
+  curl -s --max-time 15 "${API_BASE}/api/v1/progress" || die "GET /api/v1/progress failed"
 }
 
 api_post() { # path body
   pf_up
-  curl -s --max-time 300 -X POST "http://127.0.0.1:${PF_LOCAL_PORT}$1" \
-    -H 'Content-Type: application/json' -d "$2" \
+  curl -s --max-time 300 -X POST "${API_BASE}$1" -H 'Content-Type: application/json' -d "$2" \
     || die "POST $1 failed"
 }
 
@@ -253,8 +296,17 @@ except Exception:
     print("")' "$1"
 }
 
+chart_ref() {
+  if [ -n "$CHART_DIR" ]; then
+    [ -d "$CHART_DIR" ] || die "chart dir not found: $CHART_DIR"
+    printf '%s' "$CHART_DIR"
+  else
+    printf '%s' "$CHART"
+  fi
+}
+
 cmd_check() {
-  require_migration_args
+  [ "$MODE" = auto ] || die "check requires auto mode (manual mode: verify your URIs yourself)"
   local fail=0 src_comp dst_comp src_phase dst_phase src_ver dst_ver dbs dst_primary
   src_phase="$(cluster_phase "$SRC_NS" "$SRC_CLUSTER")"
   dst_phase="$(cluster_phase "$DST_NS" "$DST_CLUSTER")"
@@ -307,102 +359,74 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
   fi
 
   build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp" >/dev/null \
-    && info "source credentials ok (${SRC_NS}, ${SRC_CLUSTER}-...-account-root)" \
-    || { warn "failed to read source credentials"; fail=1; }
+    && info "source credentials ok" || { warn "failed to read source credentials"; fail=1; }
   build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp" >/dev/null \
-    && info "destination credentials ok (${DST_NS}, ${DST_CLUSTER}-...-account-root)" \
-    || { warn "failed to read destination credentials"; fail=1; }
+    && info "destination credentials ok" || { warn "failed to read destination credentials"; fail=1; }
 
   [ "$fail" -eq 0 ] && info "check passed" || die "check failed (see warnings above)"
 }
 
 cmd_deploy() {
-  require_migration_args
-  [ -n "$IMAGE" ] || die "deploy requires --image"
-  local src_comp dst_comp secret_name="${NAME}-conf" existing cur_image
-  src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
-  dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
+  local extra=()
+  [ -n "$IMAGE" ] && extra+=(--set-string "image.tag=${IMAGE##*:}")
+  [ -n "$CHART_VERSION" ] && [ -z "$CHART_DIR" ] && extra+=(--version "$CHART_VERSION")
+  info "helm upgrade --install $NAMESPACE/$RELEASE (no config; run configure next)"
+  helm upgrade --install "$RELEASE" "$(chart_ref)" -n "$NAMESPACE" \
+    --timeout 3m "${extra[@]}" \
+    || die "helm install failed"
+  if [ "$MODE" = auto ]; then
+    kc wait "pod -l app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
+      -n "$NAMESPACE" --for=condition=Ready --timeout=180s >/dev/null 2>&1 \
+      || info "pod Running (mongosync starts once configure provides the config Secret)"
+  fi
+  info "deploy done: release $NAMESPACE/$RELEASE"
+}
 
-  info "building mongosync config (credentials go through a Secret, never logs)"
-  {
-    printf '{\n'
-    printf '  "cluster0": "%s",\n' "$(build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
-    printf '  "cluster1": "%s",\n' "$(build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
-    printf '  "port": 27180,\n  "verbosity": "INFO",\n  "disableTelemetry": true\n}\n'
-  } > "$KB_TMP/conf.json"
+cmd_configure() {
+  local src_comp dst_comp secret_name="${RELEASE}-conf" existing
+  if [ "$MODE" = auto ]; then
+    src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
+    dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
+    SRC_URI="$(build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
+    DST_URI="$(build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
+  fi
+  [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "no connection strings available"
+  cat > "$KB_TMP/conf.json" <<EOF
+{
+  "cluster0": "${SRC_URI}",
+  "cluster1": "${DST_URI}",
+  "port": 27180,
+  "verbosity": "INFO",
+  "disableTelemetry": true
+}
+EOF
   chmod 600 "$KB_TMP/conf.json"
 
-  existing="$(kc_never_fails kc get secret "$secret_name" -n "$SRC_NS" -o jsonpath='{.data.conf\.json}' | base64 -d)"
+  existing="$(kc_never_fails kc get secret "$secret_name" -n "$NAMESPACE" -o jsonpath='{.data.conf\.json}' | base64 -d)"
   if [ "$existing" = "$(cat "$KB_TMP/conf.json")" ]; then
     info "config Secret already up to date, skipping"
+    return 0
+  fi
+  if kc get secret "$secret_name" -n "$NAMESPACE" >/dev/null 2>&1; then
+    info "config changed, replacing Secret and restarting the pod"
+    kc delete secret "$secret_name" -n "$NAMESPACE" >/dev/null
+    kc create secret generic "$secret_name" -n "$NAMESPACE" \
+      --from-file=conf.json="$KB_TMP/conf.json" >/dev/null || die "failed to create config Secret"
+    kc delete pod -l "app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
+      -n "$NAMESPACE" >/dev/null
   else
-    if kc get secret "$secret_name" -n "$SRC_NS" >/dev/null 2>&1; then
-      info "config changed, replacing Secret (running pod needs teardown + deploy to pick it up)"
-      kc delete secret "$secret_name" -n "$SRC_NS" >/dev/null
-    fi
-    kc create secret generic "$secret_name" -n "$SRC_NS" \
-      --from-file=conf.json="$KB_TMP/conf.json" >/dev/null \
-      || die "failed to create config Secret"
-    info "config Secret created: $SRC_NS/$secret_name"
+    kc create secret generic "$secret_name" -n "$NAMESPACE" \
+      --from-file=conf.json="$KB_TMP/conf.json" >/dev/null || die "failed to create config Secret"
   fi
-
-  if kc get pod "$NAME" -n "$SRC_NS" >/dev/null 2>&1; then
-    cur_image="$(kc_never_fails kc get pod "$NAME" -n "$SRC_NS" -o jsonpath='{.spec.containers[0].image}')"
-    if [ "$cur_image" = "$IMAGE" ]; then
-      info "pod already exists with same image, skipping (teardown first to recreate)"
-      kc wait "pod/$NAME" -n "$SRC_NS" --for=condition=Ready --timeout=180s >/dev/null \
-        || warn "pod exists but not Ready; kubectl describe pod -n $SRC_NS $NAME"
-      return 0
-    fi
-    if [ "$FORCE" -eq 1 ]; then
-      warn "pod image differs ($cur_image -> $IMAGE), --force replacing"
-      kc delete pod "$NAME" -n "$SRC_NS" >/dev/null
-    else
-      die "pod exists with a different image ($cur_image); add --force to replace"
-    fi
+  if [ "$MODE" = auto ]; then
+    kc wait "pod -l app.kubernetes.io/instance=${RELEASE},app.kubernetes.io/name=kb-mongosync" \
+      -n "$NAMESPACE" --for=condition=Ready --timeout=300s >/dev/null \
+      || die "mongosync pod not Ready after configure"
   fi
-
-  info "deploying mongosync pod (image $IMAGE)"
-  kc apply -f - >/dev/null <<EOF
-apiVersion: v1
-kind: Pod
-metadata:
-  name: $NAME
-  namespace: $SRC_NS
-  labels:
-    app: $NAME
-    kb-mongosync/source: $SRC_CLUSTER
-    kb-mongosync/destination: $DST_CLUSTER
-spec:
-  containers:
-    - name: mongosync
-      image: $IMAGE
-      args: ["--config", "/etc/mongosync/conf.json", "--acceptDisclaimer"]
-      ports:
-        - containerPort: 27180
-          name: api
-      readinessProbe:
-        httpGet: {path: /api/v1/progress, port: api}
-        periodSeconds: 5
-        failureThreshold: 60
-      resources:
-        limits: {cpu: "1", memory: 2Gi}
-        requests: {cpu: 200m, memory: 512Mi}
-      volumeMounts:
-        - name: conf
-          mountPath: /etc/mongosync
-          readOnly: true
-  volumes:
-    - name: conf
-      secret: {secretName: $secret_name}
-EOF
-  kc wait "pod/$NAME" -n "$SRC_NS" --for=condition=Ready --timeout=300s >/dev/null \
-    || die "pod not Ready; check kubectl logs -n $SRC_NS $NAME"
-  info "deploy done: $SRC_NS/$NAME"
+  info "configure done: $NAMESPACE/$secret_name"
 }
 
 cmd_start() {
-  require_migration_args
   local state resp
   state="$(progress_field state)"
   case "$state" in
@@ -423,14 +447,10 @@ if d.get("success"):
 else:
     print("[start] FAILED:", d.get("error"), "-", d.get("errorDescription"), file=sys.stderr)
     sys.exit(1)'
-  info "start accepted; watch with status/wait (copy phase then incremental lag)"
+  info "start accepted; watch with status/wait"
 }
 
 cmd_status() {
-  require_migration_args
-  if ! kc get pod "$NAME" -n "$SRC_NS" >/dev/null 2>&1; then
-    die "pod $SRC_NS/$NAME not found, run deploy first"
-  fi
   api_get_progress | python3 -c '
 import json,sys
 try:
@@ -450,7 +470,6 @@ if v: print("verification =", json.dumps(v)[:200])'
 }
 
 cmd_wait() {
-  require_migration_args
   local deadline=$(( $(date +%s) + WAIT_TIMEOUT )) state lag ok
   info "waiting for: $WAIT_FOR (timeout ${WAIT_TIMEOUT}s)"
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -473,32 +492,38 @@ print("yes" if t and c and int(c)>=int(t) else "no")')"
       *) die "unknown --for: $WAIT_FOR" ;;
     esac
     info "  ... state=$state lag=${lag:-n/a}"
-    [ "$state" = "ERROR" ] && die "mongosync state=ERROR, aborting wait (kubectl logs -n $SRC_NS $NAME)"
+    [ "$state" = "ERROR" ] && die "mongosync state=ERROR, aborting wait"
     sleep 10
   done
   die "timed out waiting for $WAIT_FOR (${WAIT_TIMEOUT}s)"
 }
 
 cmd_verify() {
-  require_migration_args
+  if [ "$MODE" != auto ]; then
+    cat <<'EOF'
+verify needs auto mode (it execs mongosh on the clusters).
+In manual mode compare both sides yourself, e.g. per database:
+  db.runCommand({dbHash: 1, collections: db.getCollectionNames()})
+EOF
+    exit 2
+  fi
   local src_comp dst_comp sp dp out6 out8
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
   dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
-  if kc get pod "$NAME" -n "$SRC_NS" >/dev/null 2>&1; then
+  if kc get pod "$(release_pod)" -n "$NAMESPACE" >/dev/null 2>&1; then
     local lag; lag="$(progress_field lagTimeSeconds)"
-    [ "$lag" = "0" ] || warn "lag=${lag:-n/a}s (results may drift while source is written; rerun after stopping writers)"
+    [ "$lag" = "0" ] || warn "lag=${lag:-n/a}s (results may drift while the source is written)"
   else
-    warn "mongosync pod not found, skipping lag check (offline comparison only)"
+    warn "release pod not found, skipping lag check (offline comparison)"
   fi
   sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
   dp="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
   [ -n "$sp" ] || die "no primary pod on source"
   [ -n "$dp" ] || die "no primary pod on destination"
   local js='
-    const skip = ["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"];
     const out = {};
     for (const dbName of db.getMongo().getDBNames()) {
-      if (skip.includes(dbName)) continue;
+      if (["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"].includes(dbName)) continue;
       const d = db.getSiblingDB(dbName);
       const cols = d.getCollectionNames().filter(c => !c.startsWith("system."));
       out[dbName] = {hash: d.runCommand({dbHash: 1, collections: cols}).md5, collections: {}};
@@ -525,11 +550,10 @@ sys.exit(0 if ok else 1)' || die "verify failed"
 }
 
 cmd_commit() {
-  require_migration_args
   local state can_commit deadline
   state="$(progress_field state)"
   if [ "$state" = "COMMITTED" ]; then
-    info "already COMMITTED (idempotent); run the unblock subcommand to make the source writable again"
+    info "already COMMITTED (idempotent); run unblock to make the source writable again"
     return 0
   fi
   can_commit="$(progress_field canCommit)"
@@ -537,12 +561,12 @@ cmd_commit() {
   cat >&2 <<EOF
 
 About to commit the migration (POST /api/v1/commit). Notes:
-  1. mongosync immediately enables user write-block on the SOURCE cluster.
-     During the COMMITTING window (usually seconds, minutes at high lag)
-     writes to the source will fail. Stop or degrade write traffic first
-     if the workload cannot tolerate write errors.
-  2. After COMMITTED the destination is writable (canWrite=true) and the
-     source stays write-blocked until you run the unblock subcommand.
+  1. mongosync immediately write-blocks the SOURCE cluster. During the
+     COMMITTING window (seconds, minutes at high lag) source writes fail.
+     Stop or degrade write traffic first if the workload cannot tolerate
+     write errors.
+  2. After COMMITTED the destination is writable and the source stays
+     blocked until you run the unblock subcommand.
   3. Commit is final (reverse is only possible before commit).
 
 EOF
@@ -568,7 +592,7 @@ print("[commit] accepted, waiting for COMMITTED ...")' || die "commit request re
         info "COMMITTED; destination writable (canWrite=$(progress_field canWrite))"
         info "next: switch the app to the destination -> (optional) unblock -> teardown"
         return 0 ;;
-      ERROR) die "commit failed (kubectl logs -n $SRC_NS $NAME)" ;;
+      ERROR) die "commit failed" ;;
     esac
     sleep 5
   done
@@ -576,12 +600,18 @@ print("[commit] accepted, waiting for COMMITTED ...")' || die "commit request re
 }
 
 cmd_unblock() {
-  require_migration_args
+  if [ "$MODE" != auto ]; then
+    cat <<'EOF'
+unblock needs auto mode. On the source primary run:
+  db.adminCommand({setUserWriteBlockMode: 1, global: false})
+EOF
+    exit 2
+  fi
   local src_comp sp
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
   sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
   [ -n "$sp" ] || die "no primary pod on source"
-  warn "after unblocking, source and destination can diverge (the source holds stale data). Only unblock for archive/rollback use."
+  warn "after unblocking, source and destination can diverge (the source holds stale data)"
   if [ "$ASSUME_YES" -ne 1 ]; then
     [ -t 0 ] || die "non-interactive session: add --yes to confirm"
     printf 'Type yes to continue: ' >&2
@@ -594,82 +624,75 @@ cmd_unblock() {
 }
 
 cmd_teardown() {
-  require_migration_args
-  kc delete pod "$NAME" -n "$SRC_NS" --ignore-not-found >/dev/null
-  kc delete secret "${NAME}-conf" -n "$SRC_NS" --ignore-not-found >/dev/null
-  info "teardown done (idempotent)"
+  helm uninstall "$RELEASE" -n "$NAMESPACE" --wait --timeout 2m \
+    || die "helm uninstall failed (release $NAMESPACE/$RELEASE)"
+  kc delete secret "${RELEASE}-conf" -n "$NAMESPACE" --ignore-not-found >/dev/null
+  info "teardown done"
 }
 
 cmd_rbac() {
-  require_migration_args
+  [ "$MODE" = auto ] || die "rbac requires auto mode"
   local src_comp dst_comp
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER" 2>/dev/null || echo "<component>")" || src_comp="<component>"
   dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER" 2>/dev/null || echo "<component>")" || dst_comp="<component>"
   cat <<EOF
-# Generated by "kb-mongosync rbac" - least-privilege Role/RoleBinding.
-# Apply with: kubectl apply -f <file>
-# Cross-namespace migration: the destination namespace needs the same Role.
+# Least-privilege Role/RoleBinding for kb-mongosync.
+# The destination namespace needs the same Role.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: kb-mongosync-operator
-  namespace: $SRC_NS
+  namespace: $NAMESPACE
 rules:
   - apiGroups: ["apps.kubeblocks.io"]
     resources: ["clusters"]
     verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "secrets", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["delete"]
   - apiGroups: [""]
     resources: ["pods/exec", "pods/portforward"]
     verbs: ["create", "get"]
   - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "create", "delete"]
-  - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: kb-mongosync-operator
-  namespace: $SRC_NS
-subjects:
-  - kind: User
-    name: <kc-user>          # see: kubectl auth whoami
-roleRef:
-  kind: Role
-  name: kb-mongosync-operator
-  apiGroup: rbac.authorization.k8s.io
 EOF
-  [ "$SRC_NS" = "$DST_NS" ] || printf '\n# Duplicate the Role/RoleBinding above in namespace %s (destination).\n' "$DST_NS"
-  info "source ns: $SRC_NS (component $src_comp), destination ns: $DST_NS (component $dst_comp)"
+  info "helm needs its own rights to create deployments/services/secrets in $NAMESPACE"
 }
 
 cmd_run() {
   cmd_check
   cmd_deploy
+  cmd_configure
   cmd_start
   WAIT_FOR="copy" cmd_wait
   cmd_status
   cat <<EOF
 
 Next steps (each re-runnable):
-  1) watch incremental lag:  $0 ... status
-  2) consistency check:      $0 ... verify            # best after stopping writers
-  3) commit the migration:   $0 ... commit --yes      # source auto write-blocked -> COMMITTED
-  4) switch the app connection string to the destination
-  5) optional, re-enable source writes: $0 ... unblock --yes
-  6) cleanup:                $0 ... teardown
+  1) watch lag:      $0 ... status
+  2) verify:         $0 ... verify            # best after stopping writers
+  3) commit:         $0 ... commit --yes      # source write-blocked -> COMMITTED
+  4) switch the app to the destination
+  5) optional:       $0 ... unblock --yes
+  6) cleanup:        $0 ... teardown
 EOF
 }
 
 case "$SUBCMD" in
-  check)    cmd_check ;;
-  deploy)   cmd_deploy ;;
-  start)    cmd_start ;;
+  check)     cmd_check ;;
+  deploy)    cmd_deploy ;;
+  configure) cmd_configure ;;
+  start)     cmd_start ;;
   status)   cmd_status ;;
   wait)     cmd_wait ;;
   verify)   cmd_verify ;;
