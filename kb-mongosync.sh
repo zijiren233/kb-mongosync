@@ -821,6 +821,7 @@ block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivile
         w = "WRITABLE";
       } catch (e) { w = "BLOCKED"; }
       finally { try { c.close(); } catch (e) {} }
+      try { db.getSiblingDB("kbms_block_probe").dropDatabase(); } catch (e) {}
       admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}});
       print("uwb=" + r.ok + " probe=" + w);'
   else
@@ -834,10 +835,10 @@ block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivile
       const admin = db.getSiblingDB("admin");
       try { admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}}); } catch (e) {}
       admin.runCommand({createUser: "kbms_block_probe", pwd: "kbms-probe-pw", roles: [{role: "readWrite", db: "kbms_block_probe"}]});
-      // a live mongosync holds a leased source block post-commit and re-asserts
-      // it; keep releasing and probing until the lift sticks (observed <20s)
+      // probe only: insert as the unprivileged user (readWrite cannot
+      // dropDatabase, so keep any cleanup out of the probe try block)
       let w = "?"; let uwb = "-";
-      for (let i = 0; i < 10 && w !== "WRITABLE"; i++) {
+      for (let i = 0; i < 3 && w !== "WRITABLE"; i++) {
         const rr = db.adminCommand({setUserWriteBlockMode: 1, global: false});
         uwb = "ok:" + rr.ok;
         const c = new Mongo("localhost:27017");
@@ -845,10 +846,10 @@ block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivile
           c.getDB("admin").auth("kbms_block_probe", "kbms-probe-pw");
           c.getDB("kbms_block_probe").c.insertOne({at: new Date()});
           w = "WRITABLE";
-          c.getDB("kbms_block_probe").dropDatabase();
-        } catch (e) { w = "BLOCKED"; if (i < 9) sleep(3000); }
+        } catch (e) { w = "BLOCKED"; if (i < 2) sleep(3000); }
         finally { try { c.close(); } catch (e) {} }
       }
+      try { db.getSiblingDB("kbms_block_probe").dropDatabase(); } catch (e) {}
       admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}});
       print("uwb=" + uwb + " fsyncUnlock=" + fs + " probe=" + w);'
   fi
