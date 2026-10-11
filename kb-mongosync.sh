@@ -102,8 +102,7 @@ Subcommands:
   wait        wait for a condition (--for)
   verify      compare counts and dbHash on both sides (auto mode)
   inspect     show write rate, oplog quiescence, active writers, write-block
-              state and inventory of the source (--dst: destination)
-  commit      commit the migration (source write-blocked, then COMMITTED)
+              state and inventory of the source (--dst: destination)  commit      commit the migration (source write-blocked, then COMMITTED)
   block       fence the source against application writes now (pre-cutover step;
               writes fail fast until unblock)
   unblock     release the source write block (auto mode)
@@ -964,25 +963,30 @@ inspect_writers_js() {
 
 inspect_activity_js() {
   printf '
-    function lastUserTs() {
-      const e = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(1).toArray()[0];
-      return e ? e.ts.toString() : "";
+    function userOps(n) {
+      return db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(n).toArray()
+        .filter(e => e.ns !== "config.system.sessions" && !e.ns.startsWith("kbms_block_probe"));
     }
-    function tsSecs(s) { const m = s.match(/t: (\d+)/); return m ? parseInt(m[1]) : 0; }
+    function tsSecs(ts) {
+      if (ts.t !== undefined) return ts.t;
+      const m = ts.toString().match(/(\d+)/);
+      return m ? parseInt(m[1]) : 0;
+    }
     const oc1 = db.serverStatus().opcounters;
-    const ts1 = lastUserTs();
+    const ts1 = (function() { const a = userOps(20); return a.length ? a[0].ts.toString() : ""; })();
     sleep(8000);
     const oc2 = db.serverStatus().opcounters;
-    const ts2 = lastUserTs();
+    const recent = userOps(20).slice(0, 10);
+    const ts2 = recent.length ? recent[0].ts.toString() : "";
     const r = function(k) { return ((oc2[k] - oc1[k]) / 8).toFixed(1); };
-    const age = ts2 ? (Math.floor(Date.now() / 1000) - tsSecs(ts2)) : -1;
+    const age = ts2 ? (Math.floor(Date.now() / 1000) - tsSecs(recent[0].ts)) : -1;
     const quiet = ts1 === ts2;
     print("write rate (8s window): insert " + r("insert") + "/s  update " + r("update") + "/s  delete " + r("delete") + "/s");
     print("oplog user ops: " + (age >= 0 ? "last " + age + "s ago" : "none") + "; window " + (quiet ? "QUIET" : "ACTIVE"));
-    const recent = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(10).toArray();
     print("recent user ops (newest first):");
     if (!recent.length) print("  (none)");
-    for (const e of recent) print("  " + new Date(tsSecs(e.ts.toString()) * 1000).toISOString() + "  " + e.op + "  " + e.ns);'
+    for (const e of recent)
+      print("  " + new Date(tsSecs(e.ts) * 1000).toISOString() + "  " + e.op + "  " + e.ns);'
 }
 
 inspect_inventory_js() {
@@ -1023,7 +1027,7 @@ cmd_inspect() {
   fi
   if [ "$INSPECT_DST" -ne 1 ]; then
     if printf '%s' "$quiet" | grep -q "window QUIET"; then
-      info "verdict: $label is quiet (matches the commit gate's definition)"
+      info "verdict: $label is quiet (no user writes over the 8s window)"
     else
       warn "verdict: $label is being written; stop writers (see above) before committing"
     fi
