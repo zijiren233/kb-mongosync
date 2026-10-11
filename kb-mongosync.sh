@@ -835,14 +835,16 @@ block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivile
       try { admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}}); } catch (e) {}
       admin.runCommand({createUser: "kbms_block_probe", pwd: "kbms-probe-pw", roles: [{role: "readWrite", db: "kbms_block_probe"}]});
       let w = "?";
-      const c = new Mongo("localhost:27017");
-      try {
-        c.getDB("admin").auth("kbms_block_probe", "kbms-probe-pw");
-        c.getDB("kbms_block_probe").c.insertOne({at: new Date()});
-        w = "WRITABLE";
-        c.getDB("kbms_block_probe").dropDatabase();
-      } catch (e) { w = "BLOCKED"; }
-      finally { try { c.close(); } catch (e) {} }
+      for (let i = 0; i < 5 && w !== "WRITABLE"; i++) {
+        const c = new Mongo("localhost:27017");
+        try {
+          c.getDB("admin").auth("kbms_block_probe", "kbms-probe-pw");
+          c.getDB("kbms_block_probe").c.insertOne({at: new Date()});
+          w = "WRITABLE";
+          c.getDB("kbms_block_probe").dropDatabase();
+        } catch (e) { w = "BLOCKED"; if (i < 4) sleep(3000); }
+        finally { try { c.close(); } catch (e) {} }
+      }
       admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}});
       print("uwb=" + r1.ok + " fsyncUnlock=" + fs + " probe=" + w);'
   fi
@@ -897,7 +899,7 @@ EOF
   out="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$(block_probe_js unblock)")"
   echo "$out" | tail -1
   echo "$out" | grep -q "uwb=1" && echo "$out" | grep -q "probe=WRITABLE" \
-    || die "source is not writable after unblock (probe write failed)"
+    || die "source is not writable after unblock (probe write failed; a live mongosync may be re-blocking - teardown the release and retry)"
   if echo "$out" | grep -q "fsyncUnlock=not-locked"; then
     info "user write block released; no fsync lock was held"
   elif echo "$out" | grep -q "lockCount:0"; then
