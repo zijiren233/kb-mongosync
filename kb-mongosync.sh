@@ -169,7 +169,7 @@ done
 # Only subcommands that touch KubeBlocks clusters or build chart values need a
 # full input mode; API-driving subcommands work standalone (also in-pod).
 case "$SUBCMD" in
-  check|deploy|verify|block|unblock|rbac|run)
+  check|deploy|verify|inspect|block|unblock|rbac|run)
     if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
       [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
       validate_uri --source-uri "$SRC_URI"
