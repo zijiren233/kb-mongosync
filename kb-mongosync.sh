@@ -829,12 +829,6 @@ block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivile
       print("uwb=" + r.ok + " probe=" + w);'
   else
     printf '
-      const r1 = db.adminCommand({setUserWriteBlockMode: 1, global: false});
-      let fs = "skipped";
-      try {
-        const r2 = db.adminCommand({fsyncUnlock: 1});
-        fs = "ok:" + r2.ok + " lockCount:" + (r2.lockCount === undefined ? "-" : r2.lockCount);
-      } catch (e) { fs = "not-locked"; }
       const admin = db.getSiblingDB("admin");
       try { admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}}); } catch (e) {}
       admin.runCommand({createUser: "kbms_block_probe", pwd: "kbms-probe-pw", roles: [{role: "readWrite", db: "kbms_block_probe"}]});
@@ -854,7 +848,7 @@ block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivile
       }
       try { db.getSiblingDB("kbms_block_probe").dropDatabase(); } catch (e) {}
       admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}});
-      print("uwb=" + uwb + " fsyncUnlock=" + fs + " probe=" + w);'
+      print("uwb=" + uwb + " probe=" + w);'
   fi
 }
 
@@ -907,14 +901,8 @@ EOF
   out="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$(block_probe_js unblock)")"
   echo "$out" | tail -1
   echo "$out" | grep -q "uwb=ok:1" && echo "$out" | grep -q "probe=WRITABLE" \
-    || die "source is not writable after unblock (probe write failed; a live mongosync may be re-blocking - teardown the release and retry)"
-  if echo "$out" | grep -q "fsyncUnlock=not-locked"; then
-    info "user write block released; no fsync lock was held"
-  elif echo "$out" | grep -q "lockCount:0"; then
-    info "source cluster is writable again (user write block and fsync lock released)"
-  else
-    warn "outer fsync lock(s) still held (lockCount>0); run unblock again or fsyncUnlock manually"
-  fi
+    || die "source is not writable after unblock (probe write failed)"
+  info "source cluster is writable again"
 }
 
 # read-only check whether user writes are currently blocked (probe user is
