@@ -101,8 +101,9 @@ Subcommands:
   wait        wait for a condition (--for)
   verify      compare counts and dbHash on both sides (auto mode)
   commit      commit the migration (source write-blocked, then COMMITTED)
-  block       freeze the source primary now (pre-cutover step; writes stall, reads ok)
-  unblock     unfreeze the source primary (auto mode)
+  block       fence the source against application writes now (pre-cutover step;
+              writes fail fast until unblock)
+  unblock     release the source write block (auto mode)
   teardown    helm uninstall the release
   rbac        print least-privilege Role/RoleBinding
   run         check, deploy, start, wait for copy, status
@@ -707,10 +708,11 @@ cmd_commit() {
   can_commit="$(progress_field canCommit)"
   [ "$can_commit" = "True" ] || die "canCommit=false (state=$state); run wait --for can-commit first"
   # mongosync 1.16 fatals (verifier race) if source writes land after final
-  # verification begins. The authoritative check is oplog quiescence (no user
-  # ops over an 8s window) wherever the tool can reach the clusters; a frozen
-  # (fsync-locked) source reports a stale growing lag, so lag is only used as
-  # the fallback gate in pure manual mode, and strictly (all samples 0).
+  # verification begins. enableUserWriteBlocking fences ordinary users from
+  # commit-receive on, but root/restore/__system bypass it, so the authoritative
+  # check is oplog quiescence (no user ops over an 8s window) wherever the tool
+  # can reach the clusters; lag is only the fallback gate in pure manual mode,
+  # and strictly (all samples 0).
   local lag quiet0=0 i ts1 ts2 src_comp sp gns gcl
   gns="$SRC_NS"; gcl="$SRC_CLUSTER"
   if [ -z "$gns" ] && [ -n "${KBMS_SOURCE_NAMESPACE:-}" ]; then
@@ -759,9 +761,11 @@ cmd_commit() {
   cat >&2 <<EOF
 
 About to commit the migration (POST /api/v1/commit). Notes:
-  1. mongosync write-blocks the SOURCE during commit. On 1.16 a user write
-     that races the final verification aborts mongosync fatally, so this
-     command checks the source is quiet first (lag + oplog) unless --force.
+  1. mongosync write-blocks the SOURCE when it receives commit (flag on:
+     ordinary users fail fast; root/restore bypass it). On 1.16 a write that
+     races the final verification aborts mongosync fatally, so this command
+     checks the source is quiet first (oplog, lag in manual mode) unless
+     --force.
   2. After COMMITTED the destination is writable and the source stays
      blocked until you run the unblock subcommand.
   3. Commit is final (reverse is only possible before commit).
@@ -774,7 +778,7 @@ EOF
     [ "$answer" = "yes" ] || die "aborted"
   fi
   info "POST /api/v1/commit"
-  # the commit response body may come back empty (observed with a frozen
+  # the commit response body may come back empty (observed with a blocked
   # source); the state poll below is the source of truth either way
   api_post /api/v1/commit '{ }' | python3 -c '
 import json,sys
@@ -802,17 +806,23 @@ print("[commit] accepted, waiting for COMMITTED ...")' || die "commit request re
   die "timed out waiting for COMMITTED (${WAIT_TIMEOUT}s)"
 }
 
-block_probe_js() { # "block" or "unblock"
+block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivileged user (root bypasses the block)
   if [ "$1" = block ]; then
     printf '
-      const r = db.adminCommand({fsync: 1, lock: true});
+      const r = db.adminCommand({setUserWriteBlockMode: 1, global: true});
+      const admin = db.getSiblingDB("admin");
+      try { admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}}); } catch (e) {}
+      admin.runCommand({createUser: "kbms_block_probe", pwd: "kbms-probe-pw", roles: [{role: "readWrite", db: "kbms_block_probe"}]});
       let w = "?";
+      const c = new Mongo("localhost:27017");
       try {
-        db.getSiblingDB("kbms_probe").runCommand({insert: "probe", documents: [{t: new Date()}], maxTimeMS: 2000});
+        c.getDB("admin").auth("kbms_block_probe", "kbms-probe-pw");
+        c.getDB("kbms_block_probe").c.insertOne({at: new Date()});
         w = "WRITABLE";
-        db.getSiblingDB("kbms_probe").dropDatabase();
-      } catch (e) { w = "FROZEN(" + e.codeName + ")"; }
-      print("ok=" + r.ok + " lockCount=" + r.lockCount + " write=" + w);'
+      } catch (e) { w = "BLOCKED"; }
+      finally { try { c.close(); } catch (e) {} }
+      admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}});
+      print("uwb=" + r.ok + " probe=" + w);'
   else
     printf '
       const r1 = db.adminCommand({setUserWriteBlockMode: 1, global: false});
@@ -821,13 +831,20 @@ block_probe_js() { # "block" or "unblock"
         const r2 = db.adminCommand({fsyncUnlock: 1});
         fs = "ok:" + r2.ok + " lockCount:" + (r2.lockCount === undefined ? "-" : r2.lockCount);
       } catch (e) { fs = "not-locked"; }
+      const admin = db.getSiblingDB("admin");
+      try { admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}}); } catch (e) {}
+      admin.runCommand({createUser: "kbms_block_probe", pwd: "kbms-probe-pw", roles: [{role: "readWrite", db: "kbms_block_probe"}]});
       let w = "?";
+      const c = new Mongo("localhost:27017");
       try {
-        db.getSiblingDB("kbms_probe").probe.insertOne({t: new Date()});
+        c.getDB("admin").auth("kbms_block_probe", "kbms-probe-pw");
+        c.getDB("kbms_block_probe").c.insertOne({at: new Date()});
         w = "WRITABLE";
-        db.getSiblingDB("kbms_probe").dropDatabase();
-      } catch (e) { w = "BLOCKED(" + e.codeName + ")"; }
-      print("uwb=" + r1.ok + " fsyncUnlock=" + fs + " write=" + w);'
+        c.getDB("kbms_block_probe").dropDatabase();
+      } catch (e) { w = "BLOCKED"; }
+      finally { try { c.close(); } catch (e) {} }
+      admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}});
+      print("uwb=" + r1.ok + " fsyncUnlock=" + fs + " probe=" + w);'
   fi
 }
 
@@ -835,7 +852,7 @@ cmd_block() {
   if [ "$MODE" != auto ]; then
     cat <<'EOF'
 block needs auto mode. On the source primary run:
-  db.adminCommand({fsync: 1, lock: true})
+  db.adminCommand({setUserWriteBlockMode: 1, global: true})
 EOF
     exit 2
   fi
@@ -843,8 +860,8 @@ EOF
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
   sp="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
   [ -n "$sp" ] || die "no primary pod on source"
-  warn "the source primary is frozen: writes stall (applications see timeouts), reads keep working"
-  warn "keep the window short; if this process dies before unblock, run: db.adminCommand({fsyncUnlock: 1})"
+  warn "application writes on the source will fail immediately (User writes blocked) until unblock"
+  warn "privileged roles (root, restore, __system) bypass user write blocking; the commit gate still refuses to POST while any writer advances the oplog"
   if [ "$ASSUME_YES" -ne 1 ]; then
     [ -t 0 ] || die "non-interactive session: add --yes to confirm"
     printf 'Type yes to continue: ' >&2
@@ -853,16 +870,16 @@ EOF
   fi
   out="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$(block_probe_js block)")"
   echo "$out" | tail -1
-  echo "$out" | grep -q "ok=1" && echo "$out" | grep -q "write=FROZEN" \
-    || die "source freeze did not engage (probe write succeeded or command failed)"
-  info "source primary is frozen; next: commit --yes (gate verifies the frozen oplog) -> switch app -> unblock"
+  echo "$out" | grep -q "uwb=1" && echo "$out" | grep -q "probe=BLOCKED" \
+    || die "user write block did not engage (probe write succeeded or command failed)"
+  info "source is fenced against application writes; next: commit --yes -> switch app -> unblock --yes"
 }
 
 cmd_unblock() {
   if [ "$MODE" != auto ]; then
     cat <<'EOF'
 unblock needs auto mode. On the source primary run:
-  db.adminCommand({fsyncUnlock: 1})
+  db.adminCommand({setUserWriteBlockMode: 1, global: false})
 EOF
     exit 2
   fi
@@ -879,12 +896,12 @@ EOF
   fi
   out="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$(block_probe_js unblock)")"
   echo "$out" | tail -1
-  echo "$out" | grep -q "write=WRITABLE" \
+  echo "$out" | grep -q "uwb=1" && echo "$out" | grep -q "probe=WRITABLE" \
     || die "source is not writable after unblock (probe write failed)"
   if echo "$out" | grep -q "fsyncUnlock=not-locked"; then
     info "user write block released; no fsync lock was held"
-  elif echo "$out" | grep -q "lockCount=0"; then
-    info "source cluster is writable again"
+  elif echo "$out" | grep -q "lockCount:0"; then
+    info "source cluster is writable again (user write block and fsync lock released)"
   else
     warn "outer fsync lock(s) still held (lockCount>0); run unblock again or fsyncUnlock manually"
   fi
