@@ -56,6 +56,7 @@ WAIT_TIMEOUT=1800
 ASSUME_YES=0
 FORCE=0
 WB_OFF=0
+INSPECT_DST=0
 
 SUBCMD=""
 WAIT_FOR="copy"
@@ -100,6 +101,8 @@ Subcommands:
   status      show sync state
   wait        wait for a condition (--for)
   verify      compare counts and dbHash on both sides (auto mode)
+  inspect     show write rate, oplog quiescence, active writers, write-block
+              state and inventory of the source (--dst: destination)
   commit      commit the migration (source write-blocked, then COMMITTED)
   block       fence the source against application writes now (pre-cutover step;
               writes fail fast until unblock)
@@ -153,6 +156,7 @@ while [ $# -gt 0 ]; do
     --yes|-y)        ASSUME_YES=1; shift ;;
     --force)         FORCE=1; shift ;;
     --no-write-blocking) WB_OFF=1; shift ;;
+    --dst)          INSPECT_DST=1; shift ;;
     -h|--help)       usage; exit 0 ;;
     -*)              die "unknown option: $1 (see --help)" ;;
     *)               [ -z "$SUBCMD" ] || die "only one subcommand allowed: '$SUBCMD' and '$1'"
@@ -914,6 +918,118 @@ EOF
   fi
 }
 
+# read-only check whether user writes are currently blocked (probe user is
+# created and dropped; it never toggles the block state itself)
+inspect_state_js() {
+  printf '
+    const admin = db.getSiblingDB("admin");
+    let state = "unknown";
+    try {
+      try { admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}}); } catch (e) {}
+      admin.runCommand({createUser: "kbms_block_probe", pwd: "kbms-probe-pw", roles: [{role: "readWrite", db: "kbms_block_probe"}]});
+      const c = new Mongo("localhost:27017");
+      try {
+        c.getDB("admin").auth("kbms_block_probe", "kbms-probe-pw");
+        c.getDB("kbms_block_probe").c.insertOne({at: new Date()});
+        state = "OFF (cluster writable)";
+      } catch (e) { state = "ON (user writes blocked)"; }
+      finally { try { c.close(); } catch (e) {} }
+    } catch (e) { state = "unknown (" + String(e.message || e).slice(0, 50) + ")"; }
+    try { db.getSiblingDB("kbms_block_probe").dropDatabase(); } catch (e) {}
+    try { admin.runCommand({dropUser: "kbms_block_probe", writeConcern: {w: "majority"}}); } catch (e) {}
+    print("write block: " + state);'
+}
+
+inspect_writers_js() {
+  printf '
+    const seen = new Map();
+    for (let k = 0; k < 4; k++) {
+      const ops = db.getSiblingDB("admin").aggregate([{$currentOp: {allUsers: true}}]).toArray();
+      for (const o of ops) {
+        if (!o.command || !o.active) continue;
+        const kind = Object.keys(o.command).filter(x => !x.startsWith("$"))[0];
+        if (!["insert","update","delete","findAndModify"].includes(kind)) continue;
+        const user = (o.effectiveUsers || []).map(u => u.user + "@" + (u.db || "?")).join(",") || "?";
+        const app = (o.clientMetadata && o.clientMetadata.application && o.clientMetadata.application.name) || "-";
+        const key = user + "|" + (o.client || "-") + "|" + (o.ns || "?");
+        if (!seen.has(key)) seen.set(key, {user: user, addr: o.client || "-", app: app, ns: o.ns || "?", kind: kind, dur: o.microsecs_running || 0});
+      }
+      if (k < 3) sleep(1500);
+    }
+    print("in-flight write ops (4 samples over ~6s): " + (seen.size ? "" : "none caught"));
+    for (const v of seen.values())
+      print("  " + v.user + "  from " + v.addr + "  app:" + v.app + "  " + v.ns + " " + v.kind + " (" + Math.round(v.dur / 1000) + "ms)");
+    if (!seen.size) print("  (bursty writers may fall between samples; check the oplog tail above/below)")'
+}
+
+inspect_activity_js() {
+  printf '
+    function lastUserTs() {
+      const e = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(1).toArray()[0];
+      return e ? e.ts.toString() : "";
+    }
+    function tsSecs(s) { const m = s.match(/t: (\d+)/); return m ? parseInt(m[1]) : 0; }
+    const oc1 = db.serverStatus().opcounters;
+    const ts1 = lastUserTs();
+    sleep(8000);
+    const oc2 = db.serverStatus().opcounters;
+    const ts2 = lastUserTs();
+    const r = function(k) { return ((oc2[k] - oc1[k]) / 8).toFixed(1); };
+    const age = ts2 ? (Math.floor(Date.now() / 1000) - tsSecs(ts2)) : -1;
+    const quiet = ts1 === ts2;
+    print("write rate (8s window): insert " + r("insert") + "/s  update " + r("update") + "/s  delete " + r("delete") + "/s");
+    print("oplog user ops: " + (age >= 0 ? "last " + age + "s ago" : "none") + "; window " + (quiet ? "QUIET" : "ACTIVE"));
+    const recent = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(10).toArray();
+    print("recent user ops (newest first):");
+    if (!recent.length) print("  (none)");
+    for (const e of recent) print("  " + new Date(tsSecs(e.ts.toString()) * 1000).toISOString() + "  " + e.op + "  " + e.ns);'
+}
+
+inspect_inventory_js() {
+  printf '
+    const skip = ["admin", "config", "local"];
+    const meta = ["__mdb_internal_mongosync", "mongosync_reserved_for_internal_use"];
+    const names = db.getMongo().getDBNames();
+    const users = names.filter(n => !skip.includes(n) && !meta.includes(n)).sort();
+    const leftovers = names.filter(n => meta.includes(n));
+    print("inventory: " + (users.length ? users.length + " user db(s)" : "no user databases")
+      + (leftovers.length ? "  [mongosync metadata present: " + leftovers.join(", ") + "; drop it for a fresh sync]" : ""));
+    for (const n of users) {
+      const d = db.getSiblingDB(n);
+      const cols = d.getCollectionNames().filter(c => !c.startsWith("system.")).sort();
+      if (!cols.length) { print("  " + n + ": (no collections)"); continue; }
+      for (const c of cols)
+        print("  " + n + "." + c + ": " + d[c].countDocuments({}) + " docs, " + d[c].getIndexes().length + " indexes");
+    }'
+}
+
+cmd_inspect() {
+  [ "$MODE" = auto ] || die "inspect requires auto mode (manual mode: check local.oplog.rs and \$currentOp yourself)"
+  local ns cluster comp sp label out quiet
+  if [ "$INSPECT_DST" -eq 1 ]; then ns="$DST_NS"; cluster="$DST_CLUSTER"; label="destination"
+  else ns="$SRC_NS"; cluster="$SRC_CLUSTER"; label="source"; fi
+  comp="$(discover_component "$ns" "$cluster")"
+  sp="$(find_primary_pod "$ns" "$cluster" "$comp" || true)"
+  [ -n "$sp" ] || die "no primary pod on $label cluster"
+  info "inspecting $label: $ns/$cluster (primary $sp)"
+  # state probe first: its createUser/dropUser ops must not pollute the
+  # quiescence window below (same reasoning as running block before commit)
+  out="$(mongosh_js "$ns" "$sp" "$comp" "$(inspect_state_js)")" && echo "$out"
+  out="$(mongosh_js "$ns" "$sp" "$comp" "$(inspect_writers_js)")" && echo "$out"
+  quiet="$(mongosh_js "$ns" "$sp" "$comp" "$(inspect_activity_js)")" && echo "$quiet"
+  out="$(mongosh_js "$ns" "$sp" "$comp" "$(inspect_inventory_js)")" && echo "$out"
+  if [ "$INSPECT_DST" -eq 1 ] && kc get pod "$(release_pod)" -n "$NAMESPACE" >/dev/null 2>&1; then
+    info "sync: state=$(progress_field state || true) lag=$(progress_field lagTimeSeconds || true)s"
+  fi
+  if [ "$INSPECT_DST" -ne 1 ]; then
+    if printf '%s' "$quiet" | grep -q "window QUIET"; then
+      info "verdict: $label is quiet (matches the commit gate's definition)"
+    else
+      warn "verdict: $label is being written; stop writers (see above) before committing"
+    fi
+  fi
+}
+
 cmd_teardown() {
   if ! helm status "$RELEASE" -n "$NAMESPACE" >/dev/null 2>&1; then
     info "release $NAMESPACE/$RELEASE not found (already removed)"
@@ -989,6 +1105,7 @@ case "$SUBCMD" in
   status)     cmd_status ;;
   wait)       cmd_wait ;;
   verify)     cmd_verify ;;
+  inspect)    cmd_inspect ;;
   commit)     cmd_commit ;;
   block)      cmd_block ;;
   unblock)    cmd_unblock ;;
