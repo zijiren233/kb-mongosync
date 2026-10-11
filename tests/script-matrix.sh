@@ -116,6 +116,9 @@ mock_state '{"state":"IDLE","canCommit":false}'
 run "${CLEAN[@]}" "$S" "${API[@]}" start; rc_is 0 "m3 start accepted"; has "start accepted" "m3 message"
 grep -q "/api/v1/start" "$TMP/posts" && grep -q "enableUserWriteBlocking" "$TMP/posts" && ok "m3 start POST issued with write blocking" || bad "m3 start POST issued"
 mock_state '{"state":"IDLE","canCommit":false}'
+run "${CLEAN[@]}" "$S" "${API[@]}" start --no-write-blocking; rc_is 0 "m3b start accepted (no blocking)"
+grep -q "/api/v1/start" "$TMP/posts" && ! grep -q "enableUserWriteBlocking" "$TMP/posts" && ok "m3b POST omits enableUserWriteBlocking" || bad "m3b POST body"
+mock_state '{"state":"IDLE","canCommit":false}'
 run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m4 commit gated on canCommit"; has "canCommit=false" "m4 message"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":0}'
 run "${CLEAN[@]}" "$S" "${API[@]}" commit </dev/null; rc_is 1 "m5 commit without --yes refused"; has "non-interactive" "m5 message"
