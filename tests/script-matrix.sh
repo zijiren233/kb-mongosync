@@ -142,11 +142,11 @@ mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":20}'
 : >"$TMP/posts"
-run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m11 manual mode: nonzero lag refused"; has "manual mode: lag was not 0" "m11 message"
+run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m11 manual mode: nonzero lag refused"; has "static-source mode cannot prove quiescence" "m11 message"
 [ -s "$TMP/posts" ] && bad "m11 no commit POST issued" || ok "m11 no commit POST issued"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":5}'
 : >"$TMP/posts"
-run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m13 manual mode: nonzero lag refused (regression: v2 gate posted here)"; has "manual mode: lag was not 0" "m13 message"
+run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m13 manual mode: nonzero lag refused (regression: v2 gate posted here)"; has "static-source mode cannot prove quiescence" "m13 message"
 [ -s "$TMP/posts" ] && bad "m13 no commit POST issued" || ok "m13 no commit POST issued"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":20}'
 run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes --force; rc_is 0 "m12 --force overrides quiet gate"; has "manual mode" "m12 warns about manual mode"; has "COMMITTED" "m12 committed"

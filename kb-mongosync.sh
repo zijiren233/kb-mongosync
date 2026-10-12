@@ -720,9 +720,10 @@ sys.exit(0 if ok else 1)' || die "verify failed"
   info "verify passed"
 }
 
-oplog_user_ts() { # ns pod comp -> stable string for the last non-noop oplog entry
+oplog_user_ts() { # ns pod comp -> stable string for the last real user oplog entry
   mongosh_js "$1" "$2" "$3" '
-    const e = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(1).toArray()[0];
+    const e = db.getSiblingDB("local").oplog.rs.find({op: {$ne: "n"}}).sort({$natural: -1}).limit(10).toArray()
+      .filter(x => x.ns !== "config.system.sessions" && !x.ns.startsWith("kbms_block_probe"))[0];
     print(e ? e.ts.toString() : "none")'
 }
 
@@ -781,7 +782,7 @@ cmd_commit() {
       if [ "$FORCE" -eq 1 ]; then
         warn "manual mode cannot verify quiescence via the oplog and lag is not all-zero; --force given"
       else
-        die "manual mode: lag was not 0 on every sample (last=${lag:-n/a}); confirm writers are stopped, then retry -- use --force to override"
+        die "static-source mode cannot prove quiescence from the API alone (idle clusters sawtooth the lag via noop oplog entries; last=${lag:-n/a}); verify the source oplog yourself, then retry with --force"
       fi
     else
       warn "manual mode quiet check is strict lag-only; make sure writers are stopped yourself"
@@ -1024,7 +1025,10 @@ inspect_inventory_js() {
 }
 
 cmd_inspect() {
-  if [ -n "${SRC_URI:-}" ] || [ -n "${DST_URI:-}" ]; then
+  if [ "$INSPECT_DST" -eq 1 ] && [ -n "${DST_URI:-}" ]; then
+    die "inspect --dst requires the destination as a KubeBlocks cluster (static URI: inspect it yourself)"
+  fi
+  if [ "$INSPECT_DST" -ne 1 ] && [ -n "${SRC_URI:-}" ]; then
     die "inspect requires auto mode (manual mode: check local.oplog.rs and \$currentOp yourself)"
   fi
   # coordinates from args on the laptop, from KBMS_* env in the release pod
