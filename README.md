@@ -4,17 +4,16 @@ Migrate MongoDB clusters with [mongosync](https://www.mongodb.com/docs/mongosync
 
 ## Quick start (serviceAccount mode)
 
-Connection strings, replica set names and credentials are discovered in-pod via the chart's ServiceAccount. From the laptop:
+Connection strings, replica set names and credentials are discovered in-pod via the chart's ServiceAccount. Cluster sides without an explicit `--src-ns`/`--dst-ns` use the kubeconfig context's namespace. From the laptop:
 
 ```bash
-./kb-mongosync.sh --kubeconfig ~/kubeconfigs/migrator.yaml \
-  --src-ns <ns> --src-cluster <src> --dst-ns <ns> --dst-cluster <dst> run
+./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> run
 
-./kb-mongosync.sh ... status          # watch state and lag
-./kb-mongosync.sh ... verify          # counts + dbHash on both sides
-./kb-mongosync.sh ... commit --yes    # source write-blocked -> COMMITTED, destination writable
-./kb-mongosync.sh ... unblock --yes   # optional: re-enable writes on the retired source
-./kb-mongosync.sh ... teardown
+./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> status          # watch state and lag
+./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> verify          # counts + dbHash on both sides
+./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> commit --yes    # source write-blocked -> COMMITTED, destination writable
+./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> unblock --yes   # optional: re-enable writes on the retired source
+./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> teardown
 ```
 
 Or exec into the pod and drive it there (no kubeconfig needed on the pod side):

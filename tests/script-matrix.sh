@@ -28,7 +28,7 @@ run "${CLEAN[@]}" "$S";                            rc_is 1 "t02 no subcommand ex
 run "${CLEAN[@]}" "$S" --bogus status;             rc_is 1 "t03 unknown option"; has "unknown option" "t03 message"
 run "${CLEAN[@]}" "$S" status start;               rc_is 1 "t04 two subcommands"; has "only one subcommand" "t04 message"
 run "${CLEAN[@]}" "$S" status --port;              rc_is 1 "t05 option without value"; has "requires a value" "t05 message"
-run "${CLEAN[@]}" "$S" --src-cluster a --dst-ns b --dst-cluster c deploy; rc_is 1 "t06 source side missing ns"; has "source side needs both" "t06 message"
+run "${CLEAN[@]}" "$S" --src-ns a --src-cluster c --dst-ns b deploy; rc_is 1 "t06 dst side missing cluster"; has "destination side needs both" "t06 message"
 run "${CLEAN[@]}" "$S" --src-ns a --dst-ns b --dst-cluster c deploy;      rc_is 1 "t07 source side missing cluster"; has "source side needs both" "t07 message"
 run "${CLEAN[@]}" "$S" --source-uri mongodb://a deploy; rc_is 1 "t08 dst side missing entirely"; has "missing --dst-ns" "t08 message"
 
@@ -41,6 +41,28 @@ rc_is 0 "t11 ambient default kubeconfig adopted silently"; has '"cluster0": "mon
 run env KUBECONFIG="$TMP/home/.kube/config" KBMS_SOURCE_URI=mongodb://u:p@a/ KBMS_DESTINATION_URI=mongodb://u:p@b/ "$S" render-conf
 rc_is 0 "t12 preset KUBECONFIG untouched (in-pod)"; has '"cluster1": "mongodb://u:p@b/"' "t12 config rendered"
 run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" status; rc_is 1 "t13 status without namespace"; has "need --namespace" "t13 message"
+
+echo "== context default namespace for cluster sides =="
+mkdir -p "$TMP/ctxns"
+cat >"$TMP/ctxns/config" <<'YAML'
+apiVersion: v1
+kind: Config
+clusters:
+- cluster: {server: "http://127.0.0.1:1"}
+  name: c
+contexts:
+- context: {cluster: c, user: u, namespace: ctx-ns}
+  name: c
+current-context: c
+users:
+- name: u
+  user: {}
+YAML
+run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/ctxns/config" --src-cluster a --dst-cluster b rbac
+rc_is 0 "t33 ns-less cluster sides adopt context ns"; has "in ctx-ns" "t33 ns used"
+sed "s/, namespace: ctx-ns//" "$TMP/ctxns/config" > "$TMP/ctxns/no-ns"
+run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/ctxns/no-ns" --src-cluster a --dst-cluster b rbac
+rc_is 0 "t34 context without ns falls back to default"; has "in default" "t34 fallback ns"
 
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"

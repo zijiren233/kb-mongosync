@@ -69,8 +69,9 @@ usage() {
 kb-mongosync: migrate MongoDB clusters via mongosync (Helm-deployed)
 
 Input sides (each side independently, mixing is allowed):
-  cluster side:  --src-ns NS --src-cluster NAME (and --dst-ns/--dst-cluster)
-                 connection strings discovered from KubeBlocks via kubectl
+  cluster side:  --src-cluster NAME [--src-ns NS]   (same for --dst-*)
+                 namespace defaults to the kubeconfig context's namespace;
+                 connection strings are discovered from KubeBlocks via kubectl
   static side:   --source-uri URI / --destination-uri URI
                  no kubectl discovery for that side
   both static = manual mode; both cluster = auto mode; one of each = hybrid
@@ -79,7 +80,8 @@ Input sides (each side independently, mixing is allowed):
 Options:
   --kubeconfig PATH       kubeconfig for kubectl/helm (default $KUBECONFIG)
   --context NAME          context to select from the kubeconfig
-  --namespace NS          release namespace (default: source namespace in auto mode)
+  --namespace NS          release namespace (default: the source namespace,
+                          which itself defaults to the kubeconfig context)
   --release NAME          helm release name (default msync-<src>-to-<dst>, or msync-manual)
   --chart URI             chart reference (default oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync)
   --chart-version V       chart version (defaults to latest)
@@ -173,8 +175,24 @@ done
 # full input mode; API-driving subcommands work standalone (also in-pod).
 # Each side resolves independently: a static URI or a namespace+cluster pair;
 # mixing the two (hybrid) is allowed. RBAC is only created for cluster sides.
+# current context's default namespace (empty when unset or unreachable)
+ctx_ns() {
+  local args=()
+  [ -n "$KCTL_CFG" ] && args=(--kubeconfig "$KCTL_CFG")
+  [ -n "$KCTX" ] && args+=(--context "$KCTX")
+  kubectl ${args[@]+"${args[@]}"} config view --minify -o jsonpath='{..namespace}' 2>/dev/null | head -n1
+}
+
 case "$SUBCMD" in
   check|deploy|verify|block|unblock|rbac|run)
+    # a cluster side given without --src-ns/--dst-ns uses the kubeconfig
+    # context's default namespace, matching kubectl's own behavior
+    if { [ -n "$SRC_CLUSTER" ] && [ -z "$SRC_NS" ]; } || { [ -n "$DST_CLUSTER" ] && [ -z "$DST_NS" ]; }; then
+      DEF_NS="$(ctx_ns)"
+      : "${DEF_NS:=default}"
+      [ -n "$SRC_NS" ] || SRC_NS="$DEF_NS"
+      [ -n "$DST_NS" ] || DST_NS="$DEF_NS"
+    fi
     if [ -n "$SRC_URI" ]; then
       [ -z "$SRC_NS" ] && [ -z "$SRC_CLUSTER" ] || die "source: pass either --source-uri or --src-ns/--src-cluster, not both"
       validate_uri --source-uri "$SRC_URI"
