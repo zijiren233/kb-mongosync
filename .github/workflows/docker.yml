@@ -24,31 +24,41 @@ jobs:
     outputs:
       meta-images: ${{ steps.meta-images.outputs.value }}
       image-tag: ${{ steps.meta-images.outputs.image-tag }}
-      msver: ${{ steps.msver.outputs.version }}
+      msver: ${{ steps.versions.outputs.default }}
+      matrix: ${{ steps.versions.outputs.matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read mongosync version
-        id: msver
+      # VERSION pins the default build (semver/chart tags follow it); the extra
+      # list adds side-by-side mongosync builds selectable via image.tag
+      # (override with the EXTRA_MONGOSYNC_VERSIONS repository variable).
+      - name: Assemble mongosync version matrix
+        id: versions
+        env:
+          EXTRA_MONGOSYNC_VERSIONS: ${{ vars.EXTRA_MONGOSYNC_VERSIONS || '"1.15.0", "1.14.0", "1.13.1"' }}
         run: |
-          ver="$(tr -d '[:space:]' < VERSION)"
-          [ -n "$ver" ] || { echo "VERSION file is empty" >&2; exit 1; }
-          echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          default="$(tr -d '[:space:]' < VERSION)"
+          [ -n "$default" ] || { echo "VERSION file is empty" >&2; exit 1; }
+          matrix="$(jq -nc --arg d "$default" --argjson e "[${EXTRA_MONGOSYNC_VERSIONS}]" '([$d] + $e) | unique')"
+          echo "default=${default}" >> "$GITHUB_OUTPUT"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
 
       - name: Verify upstream tarballs exist for both architectures
         env:
-          MSVER: ${{ steps.msver.outputs.version }}
+          MATRIX: ${{ steps.versions.outputs.matrix }}
         run: |
           set -eux
           # amd64 ships an ubuntu2204 build; arm64 only ships an Amazon 2023 build
-          for art in ubuntu2204-x86_64 amazon2023-arm64-arm64; do
-            url="https://fastdl.mongodb.org/tools/mongosync/mongosync-${art}-${MSVER}.tgz"
-            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -r 0-0 "$url" || echo 000)"
-            [ "$code" = "206" ] || [ "$code" = "200" ] || {
-              echo "upstream tarball not reachable (HTTP ${code}): ${url}" >&2
-              exit 1
-            }
+          for MSVER in $(jq -r '.[]' <<<"$MATRIX"); do
+            for art in ubuntu2204-x86_64 amazon2023-arm64-arm64; do
+              url="https://fastdl.mongodb.org/tools/mongosync/mongosync-${art}-${MSVER}.tgz"
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -r 0-0 "$url" || echo 000)"
+              [ "$code" = "206" ] || [ "$code" = "200" ] || {
+                echo "upstream tarball not reachable (HTTP ${code}): ${url}" >&2
+                exit 1
+              }
+            done
           done
 
       - name: Build image metadata inputs
@@ -83,8 +93,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   docker-build:
-    name: Tool image build
+    name: Tool image build (${{ matrix.msver }})
     needs: docker-prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        msver: ${{ fromJSON(needs.docker-prepare.outputs.matrix) }}
     permissions:
       contents: read
       packages: write
@@ -100,7 +114,7 @@ jobs:
       output: ${{ github.event_name == 'push' && 'image' || 'local' }}
       push: ${{ github.event_name == 'push' }}
       build-args: |
-        MSVER=${{ needs.docker-prepare.outputs.msver }}
+        MSVER=${{ matrix.msver }}
       artifact-upload: false
       sign: ${{ github.event_name == 'push' && 'auto' || 'false' }}
       cache: true
@@ -116,14 +130,16 @@ jobs:
         org.opencontainers.image.title=kb-mongosync tool image
         org.opencontainers.image.description=mongosync bundled with the kb-mongosync runner for KubeBlocks MongoDB migrations
       meta-images: ${{ needs.docker-prepare.outputs.meta-images }}
+      # every build carries a mongosync-<version> tag; release/semver/sha tags
+      # belong to the default build only, so tags never race across the matrix
       meta-tags: |
-        type=ref,event=branch
-        type=ref,event=pr
-        type=ref,event=tag
-        type=semver,pattern={{version}}
-        type=semver,pattern={{major}}.{{minor}}
-        type=raw,value=${{ needs.docker-prepare.outputs.image-tag }}
-        type=raw,value=mongosync-${{ needs.docker-prepare.outputs.msver }}
+        type=raw,value=mongosync-${{ matrix.msver }}
+        type=ref,event=branch,enable=${{ matrix.msver == needs.docker-prepare.outputs.msver }}
+        type=ref,event=pr,enable=${{ matrix.msver == needs.docker-prepare.outputs.msver }}
+        type=ref,event=tag,enable=${{ matrix.msver == needs.docker-prepare.outputs.msver }}
+        type=semver,pattern={{version}},enable=${{ matrix.msver == needs.docker-prepare.outputs.msver }}
+        type=semver,pattern={{major}}.{{minor}},enable=${{ matrix.msver == needs.docker-prepare.outputs.msver }}
+        type=raw,value=${{ needs.docker-prepare.outputs.image-tag }},enable=${{ matrix.msver == needs.docker-prepare.outputs.msver }}
     secrets:
       registry-auths: |
         - registry: ghcr.io

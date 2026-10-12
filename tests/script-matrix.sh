@@ -123,6 +123,27 @@ mkcluster srccl 6.0.20
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
 rc_is 0 "t38 compliant versions pass"; has "check passed" "t38 passed"
 
+echo "== deploy mongosync version selection =="
+cat >"$TMP/fakebin/helm" <<'HEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FAKE_DIR:?}/helm-args"
+exit 0
+HEOF
+chmod +x "$TMP/fakebin/helm"
+DEP=(--kubeconfig "$TMP/home/.kube/config" --src-ns n --src-cluster srccl --dst-ns n --dst-cluster dstcl --chart-dir "$PWD/charts/kb-mongosync")
+rm -f "$FAKE/helm-args"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --mongosync-version 1.15.0 deploy
+rc_is 0 "t39 deploy with --mongosync-version"
+grep -q -- "--set-string image.tag=mongosync-1.15.0" "$FAKE/helm-args" && ok "t39 tag passed to helm" || bad "t39 tag missing from helm args"
+rm -f "$FAKE/helm-args"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --mongosync-version 1.15 deploy
+rc_is 0 "t40 two-component version accepted"
+grep -q -- "--set-string image.tag=mongosync-1.15" "$FAKE/helm-args" && ok "t40 tag passed to helm" || bad "t40 tag missing from helm args"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --mongosync-version abc deploy
+rc_is 1 "t41 malformed version rejected"; has "must look like X.Y" "t41 message"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --image ghcr.io/x/y:t1 --mongosync-version 1.15.0 deploy
+rc_is 1 "t42 --image conflict rejected"; has "mutually exclusive" "t42 message"
+
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"
 run env -u KUBECONFIG KBMS_SOURCE_URI=mongodb://a "$S" render-conf; rc_is 1 "t15 dst env missing"; has "destination side needs" "t15 message"

@@ -62,13 +62,15 @@ helm install msync oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync --ve
 
 Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0). Every mongosync build still downloadable (1.13.1-1.16.0) requires a 6.0 source at patch 6.0.17 or later and a 7.0/8.0 destination; `check` enforces this and asks the server directly (`db.version()`) when a Cluster CR carries no `serviceVersion` (old KubeBlocks format). Replica count of either cluster (1 or 3) requires no configuration change.
 
+Each release also publishes side-by-side images for the other supported mongosync versions as `mongosync-<version>` tags (default from `VERSION`, extras from `EXTRA_MONGOSYNC_VERSIONS` in `.github/workflows/docker.yml`). Select one at deploy time with `--mongosync-version 1.15.0`, or set `image.tag` in the chart.
+
 ## Permissions
 
 serviceAccount mode grants the pod: `clusters get/list`, `pods get/list`, `secrets get`, `pods/exec create` in the source and destination namespaces (chart-managed via `rbac.create`). The laptop-side script needs the same reads plus `pods/portforward` and release-management rights for helm — see `rbac.yaml` or the `rbac` subcommand.
 
 ## Image
 
-CI reads `VERSION`, verifies both upstream tarballs exist, and builds `linux/amd64` + `linux/arm64` to ghcr.io (docker.io too when `DOCKERHUB_*` variables are set). The image bundles mongosync, kubectl (in-pod discovery) and kb-mongosync; the arm64 build bundles the upstream Amazon 2023 artifact (glibc compatible with the ubuntu:22.04 base).
+CI reads `VERSION` plus `EXTRA_MONGOSYNC_VERSIONS`, verifies every upstream tarball exists, and builds `linux/amd64` + `linux/arm64` per mongosync version to ghcr.io (docker.io too when `DOCKERHUB_*` variables are set). The default version carries the semver/sha/release tags; every version gets a `mongosync-<version>` tag. The image bundles mongosync, kubectl (in-pod discovery) and kb-mongosync; the arm64 build bundles the upstream Amazon 2023 artifact (glibc compatible with the ubuntu:22.04 base).
 
 ## Commit semantics
 

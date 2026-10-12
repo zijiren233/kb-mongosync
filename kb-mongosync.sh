@@ -50,6 +50,7 @@ CHART="oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync"
 CHART_VERSION=""
 CHART_DIR=""
 IMAGE=""
+MSYNC_VER=""
 SETOPT=()
 COMPONENT=""
 WAIT_TIMEOUT=1800
@@ -87,6 +88,9 @@ Options:
   --chart-version V       chart version (defaults to latest)
   --chart-dir PATH        use a local chart directory instead of --chart
   --image URI             override the tool image (repo:tag)
+  --mongosync-version V   deploy image tag mongosync-V, one of the mongosync
+                          builds published alongside the chart (default: the
+                          chart's pinned version)
   --set K=V               extra helm --set values for deploy (repeatable)
   --api-url URL           mongosync API endpoint, skips kubectl port-forward
   --port N                local port-forward start port (default 27180)
@@ -153,6 +157,7 @@ while [ $# -gt 0 ]; do
     --chart-version) need_value "$@"; CHART_VERSION="$2"; shift 2 ;;
     --chart-dir)     need_value "$@"; CHART_DIR="$2"; shift 2 ;;
     --image)         need_value "$@"; IMAGE="$2"; shift 2 ;;
+    --mongosync-version) need_value "$@"; MSYNC_VER="$2"; shift 2 ;;
     --set)           need_value "$@"; SETOPT+=(--set "$2"); shift 2 ;;
     --api-url)       need_value "$@"; API_URL="$2"; shift 2 ;;
     --port)          need_value "$@"; API_PORT="$2"; shift 2 ;;
@@ -505,7 +510,7 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
       *)            warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
     esac
   fi
-  info "note: the bundled mongosync 1.16.0 requires source >= 6.0.17 and destination 7.0/8.0"
+  info "note: every published mongosync build (1.13.1-1.16.0) requires source >= 6.0.17 and destination 7.0/8.0"
 
   if [ -n "$SRC_NS" ]; then
     src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
@@ -584,6 +589,12 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
 
 cmd_deploy() {
   local extra=() src_comp dst_comp
+  [ -n "$IMAGE" ] && [ -n "$MSYNC_VER" ] && die "--image and --mongosync-version are mutually exclusive"
+  case "$MSYNC_VER" in
+    ""|[0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) : ;;
+    *) die "--mongosync-version must look like X.Y or X.Y.Z (got '$MSYNC_VER')" ;;
+  esac
+  [ -n "$MSYNC_VER" ] && extra+=(--set-string "image.tag=mongosync-${MSYNC_VER}")
   [ -n "$IMAGE" ] && extra+=(--set-string "image.tag=${IMAGE##*:}")
   [ -n "$CHART_VERSION" ] && [ -z "$CHART_DIR" ] && extra+=(--version "$CHART_VERSION")
   extra+=("${SETOPT[@]}")
