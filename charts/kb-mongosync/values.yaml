@@ -39,6 +39,9 @@ verbosity: INFO
 port: 27180
 
 resources:
+  # mongosync copy buffers hold up to 10k documents per partition in memory;
+  # large documents need headroom (verified: 64KB docs OOM at 2Gi, stable at
+  # 6Gi copying 15GB). Raise limits for large-document datasets.
   limits:
     cpu: "1"
     memory: 2Gi
