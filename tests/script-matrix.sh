@@ -78,11 +78,13 @@ case "$1" in
         if printf '%s' "$args" | grep -q "status.phase"; then echo Running; exit 0; fi
         cat "${FAKE}/cluster-$3.json" || exit 1 ;;
       pods) cat "${FAKE}/pods.json" ;;
+      pod) exit 1 ;;
       secret)
         if printf '%s' "$args" | grep -q username; then echo "dXNlcg=="; else echo "cGFzcw=="; fi ;;
     esac ;;
   exec)
     js="${stdin_data} ${args}"
+    printf '%s\n' "$js" >> "${FAKE}/execlog"
     case "$js" in
       *"db.version()"*)
         [ -f "${FAKE}/ver-fail" ] && exit 1
@@ -90,6 +92,7 @@ case "$1" in
       *"isWritablePrimary"*) echo true ;;
       *"arbiterOnly"*) echo 0 ;;
       *"listCollections"*) : ;;
+      *"JSON.stringify"*) echo '{"bulk":{"collections":{"load0":{"count":100,"idx":1}}}}' ;;
       *"getDBNames"*) printf '\nmeta:\n' ;;
     esac ;;
 esac
@@ -145,6 +148,13 @@ run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --mongosync-version abc deploy
 rc_is 1 "t41 malformed version rejected"; has "must look like X.Y" "t41 message"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --image ghcr.io/x/y:t1 --mongosync-version 1.15.0 deploy
 rc_is 1 "t42 --image conflict rejected"; has "mutually exclusive" "t42 message"
+mkcluster srccl 8.0.5; mkcluster dstcl 8.0.5
+: >"$FAKE/execlog"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only
+rc_is 0 "t45 verify --counts-only passes"; has "counts only" "t45 mode noted"
+[ "$(grep -c dbHash "$FAKE/execlog")" = "0" ] && ok "t45 no dbHash issued" || bad "t45 dbHash was issued"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify
+rc_is 0 "t46 full verify passes"; [ "$(grep -c dbHash "$FAKE/execlog")" -ge "1" ] && ok "t46 dbHash issued once per side" || bad "t46 dbHash missing"
 
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"

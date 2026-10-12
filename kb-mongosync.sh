@@ -58,6 +58,7 @@ ASSUME_YES=0
 FORCE=0
 WB_OFF=0
 INSPECT_DST=0
+COUNTS_ONLY=0
 SRC_MODE=""
 DST_MODE=""
 
@@ -97,7 +98,9 @@ Options:
   --timeout SECS          wait/commit timeout (default 1800)
   --for COND              wait condition: copy|lag|can-commit|committed
   --yes                   assume yes (required in non-interactive sessions)
-  --force                 allow commit even if the source is not quiet
+    --force                 allow commit even if the source is not quiet
+    --counts-only           verify compares document counts only (seconds at
+                            any size; skips the dbHash full read)
   --no-write-blocking     start without enableUserWriteBlocking (mongosync
                           then never blocks source writes during commit)
   -h | --help             show this help
@@ -171,6 +174,7 @@ while [ $# -gt 0 ]; do
     --for)           need_value "$@"; WAIT_FOR="$2"; shift 2 ;;
     --yes|-y)        ASSUME_YES=1; shift ;;
     --force)         FORCE=1; shift ;;
+    --counts-only)   COUNTS_ONLY=1; shift ;;
     --no-write-blocking) WB_OFF=1; shift ;;
     --dst)          INSPECT_DST=1; shift ;;
     -h|--help)       usage; exit 0 ;;
@@ -749,13 +753,17 @@ EOF
   dp="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
   [ -n "$sp" ] || die "no primary pod on source"
   [ -n "$dp" ] || die "no primary pod on destination"
+  # counts-only mode reads collection metadata (fast at any size); the full
+  # mode additionally hashes every document on both sides
+  local hashpart=""
+  [ "$COUNTS_ONLY" = 1 ] || hashpart='hash: d.runCommand({dbHash: 1, collections: cols}).md5, '
   local js='
     const out = {};
     for (const dbName of db.getMongo().getDBNames()) {
       if (["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"].includes(dbName)) continue;
       const d = db.getSiblingDB(dbName);
       const cols = d.getCollectionNames().filter(c => !c.startsWith("system."));
-      out[dbName] = {hash: d.runCommand({dbHash: 1, collections: cols}).md5, collections: {}};
+      out[dbName] = {'"$hashpart"'collections: {}};
       for (const c of cols.sort()) {
         out[dbName].collections[c] = {count: d[c].countDocuments({}), idx: d[c].getIndexes().length};
       }
@@ -775,7 +783,7 @@ for name in sorted(set(a)|set(b)):
         ok=False
 print("verify:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)' || die "verify failed"
-  info "verify passed"
+  [ "$COUNTS_ONLY" = 1 ] && info "verify passed (counts only)" || info "verify passed"
 }
 
 oplog_user_ts() { # ns pod comp -> stable string for the last real user oplog entry

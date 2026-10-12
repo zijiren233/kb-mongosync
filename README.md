@@ -11,6 +11,7 @@ Connection strings, replica set names and credentials are discovered in-pod via 
 
 ./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> status          # watch state and lag
 ./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> verify          # counts + dbHash on both sides
+./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> verify --counts-only  # counts only: seconds at any size
 ./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> commit --yes    # source write-blocked -> COMMITTED, destination writable
 ./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> unblock --yes   # optional: re-enable writes on the retired source
 ./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> teardown
