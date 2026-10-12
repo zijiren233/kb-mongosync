@@ -183,16 +183,18 @@ ctx_ns() {
   kubectl ${args[@]+"${args[@]}"} config view --minify -o jsonpath='{..namespace}' 2>/dev/null | head -n1
 }
 
+# a cluster side given without --src-ns/--dst-ns uses the kubeconfig
+# context's default namespace, matching kubectl's own behavior (applies to
+# every subcommand, including the API-driving ones that locate the release)
+if { [ -n "$SRC_CLUSTER" ] && [ -z "$SRC_NS" ]; } || { [ -n "$DST_CLUSTER" ] && [ -z "$DST_NS" ]; }; then
+  DEF_NS="$(ctx_ns)"
+  : "${DEF_NS:=default}"
+  [ -n "$SRC_NS" ] || SRC_NS="$DEF_NS"
+  [ -n "$DST_NS" ] || DST_NS="$DEF_NS"
+fi
+
 case "$SUBCMD" in
   check|deploy|verify|block|unblock|rbac|run)
-    # a cluster side given without --src-ns/--dst-ns uses the kubeconfig
-    # context's default namespace, matching kubectl's own behavior
-    if { [ -n "$SRC_CLUSTER" ] && [ -z "$SRC_NS" ]; } || { [ -n "$DST_CLUSTER" ] && [ -z "$DST_NS" ]; }; then
-      DEF_NS="$(ctx_ns)"
-      : "${DEF_NS:=default}"
-      [ -n "$SRC_NS" ] || SRC_NS="$DEF_NS"
-      [ -n "$DST_NS" ] || DST_NS="$DEF_NS"
-    fi
     if [ -n "$SRC_URI" ]; then
       [ -z "$SRC_NS" ] && [ -z "$SRC_CLUSTER" ] || die "source: pass either --source-uri or --src-ns/--src-cluster, not both"
       validate_uri --source-uri "$SRC_URI"
