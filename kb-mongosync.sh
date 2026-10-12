@@ -59,6 +59,7 @@ FORCE=0
 WB_OFF=0
 INSPECT_DST=0
 COUNTS_ONLY=0
+NO_EVERIFY=0
 SRC_MODE=""
 DST_MODE=""
 
@@ -101,6 +102,9 @@ Options:
     --force                 allow commit even if the source is not quiet
     --counts-only           verify compares document counts only (seconds at
                             any size; skips the dbHash full read)
+    --no-embedded-verify    start with the embedded verifier off (correctness
+                            then relies on your own verification; useful for
+                            very large document counts)
   --no-write-blocking     start without enableUserWriteBlocking (mongosync
                           then never blocks source writes during commit)
   -h | --help             show this help
@@ -112,6 +116,9 @@ Subcommands:
   start       start the sync
   status      show sync state
   wait        wait for a condition (--for)
+  pause       pause the sync (source stays writable; resume before the source
+              oplog window passes or the migration cannot resume)
+  resume      resume a paused sync
   verify      compare counts and dbHash on both sides (auto mode)
   inspect     show write rate, oplog quiescence, active writers, write-block
               state and inventory of the source (--dst: destination)
@@ -175,6 +182,7 @@ while [ $# -gt 0 ]; do
     --yes|-y)        ASSUME_YES=1; shift ;;
     --force)         FORCE=1; shift ;;
     --counts-only)   COUNTS_ONLY=1; shift ;;
+    --no-embedded-verify) NO_EVERIFY=1; shift ;;
     --no-write-blocking) WB_OFF=1; shift ;;
     --dst)          INSPECT_DST=1; shift ;;
     -h|--help)       usage; exit 0 ;;
@@ -642,7 +650,7 @@ cmd_render_conf() {
 }
 
 cmd_start() {
-  local state resp body
+  local state resp body ver=""
   pf_up
   state="$(progress_field state)"
   case "$state" in
@@ -653,17 +661,21 @@ cmd_start() {
       warn "state=$state (not IDLE), refusing to start; inspect with status"
       return 1 ;;
   esac
+  if [ "$NO_EVERIFY" = 1 ]; then
+    ver=',"verification":{"enabled":false}'
+    warn "embedded verifier disabled; correctness relies on your own verification (verify / verify --counts-only)"
+  fi
   if [ "$WB_OFF" -eq 1 ]; then
-    body='{"source":"cluster0","destination":"cluster1"}'
+    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\"$ver}"
   else
-    body='{"source":"cluster0","destination":"cluster1","enableUserWriteBlocking":true}'
+    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\",\"enableUserWriteBlocking\":true$ver}"
   fi
   info "POST /api/v1/start {source: cluster0 -> destination: cluster1, enableUserWriteBlocking: $([ "$WB_OFF" -eq 1 ] && echo false || echo true)}"
   resp="$(api_post /api/v1/start "$body")"
   if printf '%s' "$resp" | grep -q 'Unrecognized key in request: enableUserWriteBlocking'; then
     # mongosync 1.20.0+ removed the flag and manages write blocking itself
     info "mongosync 1.20.0+ dropped enableUserWriteBlocking; retrying without it (write blocking is automatic)"
-    body='{"source":"cluster0","destination":"cluster1"}'
+    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\"$ver}"
     resp="$(api_post /api/v1/start "$body")"
   fi
   printf '%s' "$resp" | python3 -c '
@@ -675,6 +687,45 @@ else:
     print("[start] FAILED:", d.get("error"), "-", d.get("errorDescription"), file=sys.stderr)
     sys.exit(1)'
   info "start accepted; watch with status/wait"
+}
+
+cmd_pause() {
+  pf_up
+  local state resp
+  state="$(progress_field state)"
+  case "$state" in
+    PAUSED) info "state=PAUSED already, pause skipped (idempotent)"; return 0 ;;
+    RUNNING) : ;;
+    *) warn "state=$state, pausing requires RUNNING"; return 1 ;;
+  esac
+  info "POST /api/v1/pause"
+  resp="$(api_post /api/v1/pause '{}')"
+  printf '%s' "$resp" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+if not d.get("success"):
+    print("[pause] FAILED:", d.get("error"), "-", d.get("errorDescription"), file=sys.stderr); sys.exit(1)'
+  warn "paused: the source keeps writing but nothing is replicated; resume before the source oplog window passes"
+}
+
+cmd_resume() {
+  pf_up
+  local state resp
+  state="$(progress_field state)"
+  case "$state" in
+    RUNNING|COMMITTING|COMMITTED)
+      info "state=$state already, resume skipped (idempotent)"; return 0 ;;
+    PAUSED) : ;;
+    *) warn "state=$state, resuming requires PAUSED"; return 1 ;;
+  esac
+  info "POST /api/v1/resume"
+  resp="$(api_post /api/v1/resume '{}')"
+  printf '%s' "$resp" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+if not d.get("success"):
+    print("[resume] FAILED:", d.get("error"), "-", d.get("errorDescription"), file=sys.stderr); sys.exit(1)'
+  info "resumed; catch up with: wait --for can-commit"
 }
 
 cmd_status() {
@@ -1206,6 +1257,8 @@ case "$SUBCMD" in
   render-conf) cmd_render_conf ;;
   start)      cmd_start ;;
   status)     cmd_status ;;
+  pause)      cmd_pause ;;
+  resume)     cmd_resume ;;
   wait)       cmd_wait ;;
   verify)     cmd_verify ;;
   inspect)    cmd_inspect ;;

@@ -57,7 +57,7 @@ helm install msync oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync --ve
 
 ## Subcommands
 
-`check`, `deploy`, `render-conf`, `start`, `status`, `wait --for copy|lag|can-commit|committed`, `verify`, `inspect`, `commit`, `unblock`, `teardown`, `rbac`, `run`. All are idempotent; state is derived from the cluster on every invocation, so any step can be retried or resumed. `check`, `verify`, `inspect`, `unblock` and `rbac` require auto mode; in manual mode they print what to run instead. `inspect` reports whether the cluster is still being written (write rate over an 8s window, oplog quiescence, recent user ops), who is writing (`$currentOp`: user, client address, app name), the write-block state, and an inventory (databases, collections, doc counts, indexes); `inspect --dst` targets the destination and also reports leftover mongosync metadata.
+`check`, `deploy`, `render-conf`, `start`, `status`, `wait --for copy|lag|can-commit|committed`, `pause`, `resume`, `verify`, `inspect`, `commit`, `unblock`, `teardown`, `rbac`, `run`. All are idempotent; state is derived from the cluster on every invocation, so any step can be retried or resumed. `check`, `verify`, `inspect`, `unblock` and `rbac` require auto mode; in manual mode they print what to run instead. `inspect` reports whether the cluster is still being written (write rate over an 8s window, oplog quiescence, recent user ops), who is writing (`$currentOp`: user, client address, app name), the write-block state, and an inventory (databases, collections, doc counts, indexes); `inspect --dst` targets the destination and also reports leftover mongosync metadata.
 
 ## mongosync version
 

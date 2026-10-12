@@ -220,6 +220,10 @@ class H(http.server.BaseHTTPRequestHandler):
             if os.path.exists(NF) and "enableUserWriteBlocking" in body:
                 self._send(400, {"error":"Unrecognized key in request: enableUserWriteBlocking"}); return
             s=self._state(); s["state"]="RUNNING"; self._save(s)
+        elif self.path=="/api/v1/pause":
+            s=self._state(); s["state"]="PAUSED"; self._save(s)
+        elif self.path=="/api/v1/resume":
+            s=self._state(); s["state"]="RUNNING"; self._save(s)
         elif self.path=="/api/v1/commit":
             self._save({"state":"COMMITTED","canCommit":False,"canWrite":True,"lagTimeSeconds":0})
             self.send_response(200); self.end_headers(); self.wfile.flush(); return
@@ -261,6 +265,20 @@ run "${CLEAN[@]}" "$S" "${API[@]}" wait --for committed --timeout 5; rc_is 0 "m7
 run "${CLEAN[@]}" "$S" "${API[@]}" commit; rc_is 0 "m8 commit after COMMITTED idempotent"; has "already COMMITTED" "m8 message"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":0}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for copy --timeout 5; rc_is 0 "m16 wait copy completes for empty source (canCommit)"; has "collection copy complete" "m16 message"
+: >"$TMP/posts"
+run "${CLEAN[@]}" "$S" "${API[@]}" pause; rc_is 0 "m17 pause issues POST when RUNNING"
+grep -q "/api/v1/pause {}" "$TMP/posts" && ok "m17 pause POST issued" || bad "m17 pause POST missing"
+run "${CLEAN[@]}" "$S" "${API[@]}" pause; has "pause skipped" "m17b idempotent skip reuses state"
+mock_state '{"state":"PAUSED","canCommit":false,"lagTimeSeconds":0}'
+: >"$TMP/posts"
+run "${CLEAN[@]}" "$S" "${API[@]}" resume; rc_is 0 "m18 resume issues POST when PAUSED"
+grep -q "/api/v1/resume {}" "$TMP/posts" && ok "m18 resume POST issued" || bad "m18 resume POST missing"
+mock_state '{"state":"IDLE","canCommit":false,"lagTimeSeconds":0}'
+: >"$TMP/posts"
+run "${CLEAN[@]}" "$S" "${API[@]}" start --no-embedded-verify; rc_is 0 "m19 start with --no-embedded-verify"
+grep -q '"verification":{"enabled":false}' "$TMP/posts" && ok "m19 verification disabled in POST" || bad "m19 verification flag missing"
+mock_state '{"state":"IDLE","canCommit":false,"lagTimeSeconds":0}'
+run "${CLEAN[@]}" "$S" "${API[@]}" pause; rc_is 1 "m20 pause refused when IDLE"; has "requires RUNNING" "m20 message"
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for bogus; rc_is 1 "m9 unknown --for"; has "unknown --for" "m9 message"
 mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"
