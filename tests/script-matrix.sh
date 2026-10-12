@@ -64,6 +64,65 @@ sed "s/, namespace: ctx-ns//" "$TMP/ctxns/config" > "$TMP/ctxns/no-ns"
 run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/ctxns/no-ns" --src-cluster a --dst-cluster b rbac
 rc_is 0 "t34 context without ns falls back to default"; has "in default" "t34 fallback ns"
 
+echo "== check version gating via fake kubectl =="
+mkdir -p "$TMP/fakebin" "$TMP/fake"
+cat >"$TMP/fakebin/kubectl" <<'KEOF'
+#!/usr/bin/env bash
+FAKE="${FAKE_DIR:?}"
+stdin_data="$(cat 2>/dev/null || true)"
+args="$*"
+case "$1" in
+  get)
+    case "$2" in
+      cluster)
+        if printf '%s' "$args" | grep -q "status.phase"; then echo Running; exit 0; fi
+        cat "${FAKE}/cluster-$3.json" || exit 1 ;;
+      pods) cat "${FAKE}/pods.json" ;;
+      secret)
+        if printf '%s' "$args" | grep -q username; then echo "dXNlcg=="; else echo "cGFzcw=="; fi ;;
+    esac ;;
+  exec)
+    if [ -f "${FAKE}/exec-fail" ]; then exit 1; fi
+    js="${stdin_data} ${args}"
+    case "$js" in
+      *"isWritablePrimary"*) echo true ;;
+      *"db.version()"*) cat "${FAKE}/live-ver" ;;
+      *"arbiterOnly"*) echo 0 ;;
+      *"listCollections"*) : ;;
+      *"getDBNames"*) printf '\nmeta:\n' ;;
+    esac ;;
+esac
+exit 0
+KEOF
+chmod +x "$TMP/fakebin/kubectl"
+FAKE="$TMP/fake"
+mkcluster() { # name serviceVersion (empty = omit, like old KubeBlocks format)
+  local sv=""
+  [ -n "$2" ] && sv="\"serviceVersion\": \"$2\","
+  cat >"$FAKE/cluster-$1.json" <<EOF
+{"apiVersion":"apps.kubeblocks.io/v1","kind":"Cluster","metadata":{"name":"$1","namespace":"n"},"spec":{"componentSpecs":[{"name":"mongodb",$sv"componentDefRef":"mongodb","replicas":1}]},"status":{"phase":"Running"}}
+EOF
+}
+cat >"$FAKE/pods.json" <<'EOF'
+{"items":[{"metadata":{"name":"srccl-mongodb-0"},"status":{"phase":"Running"}},{"metadata":{"name":"dstcl-mongodb-0"},"status":{"phase":"Running"}}]}
+EOF
+printf '6.0.9' >"$FAKE/live-ver"
+CK=(--kubeconfig "$TMP/home/.kube/config" --src-ns n --src-cluster srccl --dst-ns n --dst-cluster dstcl)
+FE=(env PATH="$TMP/fakebin:$PATH" FAKE_DIR="$FAKE")
+mkcluster srccl 6.0.9; mkcluster dstcl 8.0.4
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
+rc_is 1 "t35 source below the 6.0.17 floor fails"; has "below mongosync's 6.0 floor" "t35 floor message"; has "patch-upgrade the source" "t35 remedy named"
+mkcluster srccl ""
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
+rc_is 1 "t36 missing serviceVersion falls back to live query"; has "asking the server" "t36 fallback noted"; has "server reports version 6.0.9" "t36 live version used"; has "below mongosync's 6.0 floor" "t36 floor still enforced"
+touch "$FAKE/exec-fail"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
+rc_is 1 "t37 live query failure is fail-closed"; has "cannot determine source version" "t37 message"
+rm -f "$FAKE/exec-fail"
+mkcluster srccl 6.0.20
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
+rc_is 0 "t38 compliant versions pass"; has "check passed" "t38 passed"
+
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"
 run env -u KUBECONFIG KBMS_SOURCE_URI=mongodb://a "$S" render-conf; rc_is 1 "t15 dst env missing"; has "destination side needs" "t15 message"

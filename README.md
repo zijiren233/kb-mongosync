@@ -60,7 +60,7 @@ helm install msync oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync --ve
 
 ## mongosync version
 
-Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0, the newest release accepting a 6.0.20 source; 1.17+ requires source >= 6.0.24). Replica count of either cluster (1 or 3) requires no configuration change.
+Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0). Every mongosync build still downloadable (1.13.1-1.16.0) requires a 6.0 source at patch 6.0.17 or later and a 7.0/8.0 destination; `check` enforces this and asks the server directly (`db.version()`) when a Cluster CR carries no `serviceVersion` (old KubeBlocks format). Replica count of either cluster (1 or 3) requires no configuration change.
 
 ## Permissions
 

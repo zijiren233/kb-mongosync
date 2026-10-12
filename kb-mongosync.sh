@@ -308,6 +308,19 @@ mongosh_js() { # ns pod component js
     || die "mongosh failed on pod $2"
 }
 
+# Old KubeBlocks v1alpha1 Clusters carry clusterVersionRef instead of
+# componentSpecs[].serviceVersion, so the CR cannot answer "which patch?".
+# Ask the server: it is what mongosync validates against.
+live_db_version() { # ns cluster component
+  local pod
+  pod="$(find_primary_pod "$1" "$2" "$3" || true)"
+  [ -n "$pod" ] || return 1
+  kc_never_fails kc exec "$pod" -n "$1" -c "$3" -- \
+    sh -c 'mongosh --quiet -u "$MONGODB_ROOT_USER" -p "$MONGODB_ROOT_PASSWORD" \
+           --authenticationDatabase admin --eval "print(db.version())" 2>/dev/null' \
+    | tail -n1
+}
+
 read_secret() { # ns secret key
   kc_never_fails kc get secret "$2" -n "$1" -o jsonpath="{.data.$3}" | base64 -d
 }
@@ -441,7 +454,7 @@ cmd_check() {
     src_ver="$(load_cluster "$SRC_NS" "$SRC_CLUSTER" | python3 -c '
 import json,sys; d=json.load(sys.stdin)
 print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
-    info "source:      $SRC_NS/$SRC_CLUSTER component=$src_comp serviceVersion=$src_ver"
+    info "source:      $SRC_NS/$SRC_CLUSTER component=$src_comp serviceVersion=${src_ver:-absent, asking the server}"
   else
     src_phase=""; src_comp=""; src_ver=""
     info "source:      static URI (phase/version/arbiter/collection checks skipped)"
@@ -453,10 +466,25 @@ print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
     dst_ver="$(load_cluster "$DST_NS" "$DST_CLUSTER" | python3 -c '
 import json,sys; d=json.load(sys.stdin)
 print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
-    info "destination: $DST_NS/$DST_CLUSTER component=$dst_comp serviceVersion=$dst_ver"
+    info "destination: $DST_NS/$DST_CLUSTER component=$dst_comp serviceVersion=${dst_ver:-absent, asking the server}"
   else
     dst_phase=""; dst_comp=""; dst_ver=""
     info "destination: static URI (phase/version/emptiness checks skipped)"
+  fi
+
+  if [ -n "$SRC_NS" ] && [ -z "$src_ver" ]; then
+    out="$(live_db_version "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
+    case "$out" in
+      [0-9]*.[0-9]*.[0-9]*) src_ver="$out"; info "source:      server reports version $src_ver" ;;
+      *) warn "cannot determine source version (Cluster carries no serviceVersion, live query failed)"; fail=1 ;;
+    esac
+  fi
+  if [ -n "$DST_NS" ] && [ -z "$dst_ver" ]; then
+    out="$(live_db_version "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
+    case "$out" in
+      [0-9]*.[0-9]*.[0-9]*) dst_ver="$out"; info "destination: server reports version $dst_ver" ;;
+      *) warn "cannot determine destination version (Cluster carries no serviceVersion, live query failed)"; fail=1 ;;
+    esac
   fi
 
   if [ -n "$src_ver" ] && [ -n "$dst_ver" ]; then
@@ -467,15 +495,17 @@ def v(x):
     except Exception: return (0,0,0)
 s, d = v(sys.argv[1]), v(sys.argv[2])
 if s < (6,0,0): print("bad-src")
+elif s < (6,0,17): print("low-src-patch")
 elif not ((7,0,0) <= d): print("bad-dst")
 else: print("ok")' "$src_ver" "$dst_ver")" in
-      ok)       : ;;
-      bad-src)  warn "mongosync requires source >= 6.0 (got $src_ver)"; fail=1 ;;
-      bad-dst)  warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
-      *)        warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
+      ok)           : ;;
+      bad-src)      warn "mongosync requires source >= 6.0 (got $src_ver)"; fail=1 ;;
+      low-src-patch) warn "source $src_ver is below mongosync's 6.0 floor: every downloadable build (1.13.1-1.16.0, including the bundled one) requires source >= 6.0.17; patch-upgrade the source first (>= 6.0.24 also satisfies newer mongosync)"; fail=1 ;;
+      bad-dst)      warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
+      *)            warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
     esac
   fi
-  info "note: mongosync 1.17+ requires source >= 6.0.24; use 1.16.0 for older 6.0.x sources"
+  info "note: the bundled mongosync 1.16.0 requires source >= 6.0.17 and destination 7.0/8.0"
 
   if [ -n "$SRC_NS" ]; then
     src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
