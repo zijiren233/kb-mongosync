@@ -111,10 +111,10 @@ CK=(--kubeconfig "$TMP/home/.kube/config" --src-ns n --src-cluster srccl --dst-n
 FE=(env PATH="$TMP/fakebin:$PATH" FAKE_DIR="$FAKE")
 mkcluster srccl 6.0.9; mkcluster dstcl 8.0.4
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
-rc_is 1 "t35 source below the 6.0.17 floor fails"; has "below mongosync's 6.0 floor" "t35 floor message"; has "patch-upgrade the source" "t35 remedy named"
+rc_is 1 "t35 source below the 6.0.17 floor fails"; has "below mongosync 1.16.0" "t35 floor message"; has "floor \(6\.0\.17\)" "t35 names the floor"; has "patch-upgrade the source" "t35 remedy named"
 mkcluster srccl ""
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
-rc_is 1 "t36 missing serviceVersion falls back to live query"; has "asking the server" "t36 fallback noted"; has "server reports version 6.0.9" "t36 live version used"; has "below mongosync's 6.0 floor" "t36 floor still enforced"
+rc_is 1 "t36 missing serviceVersion falls back to live query"; has "asking the server" "t36 fallback noted"; has "server reports version 6.0.9" "t36 live version used"; has "floor \(6\.0\.17\)" "t36 floor still enforced"
 touch "$FAKE/exec-fail"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
 rc_is 1 "t37 live query failure is fail-closed"; has "cannot determine source version" "t37 message"
@@ -122,6 +122,12 @@ rm -f "$FAKE/exec-fail"
 mkcluster srccl 6.0.20
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
 rc_is 0 "t38 compliant versions pass"; has "check passed" "t38 passed"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" --mongosync-version 1.22.0 check
+rc_is 1 "t43 newer mongosync raises the 6.0 floor"; has "floor \(6\.0\.24\)" "t43 6.0.24 floor"; has "1\.22\.0" "t43 selected version named"
+mkcluster srccl 8.0.5; mkcluster dstcl 8.0.4
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" --mongosync-version 1.21.0 check
+rc_is 1 "t44 mongosync 1.20+ floors 8.0 destinations"; has "destination 8\.0\.4 is below" "t44 dst floor message"; has "floor \(8\.0\.5\)" "t44 names the floor"
+mkcluster srccl 6.0.20
 
 echo "== deploy mongosync version selection =="
 cat >"$TMP/fakebin/helm" <<'HEOF'
@@ -184,7 +190,7 @@ rc_is 1 "t25 unknown context rejected"; has "context not found" "t25 message"
 echo "== api subcommands against a mock mongosync =="
 cat >"$TMP/mock.py" <<'PYEOF'
 import http.server, json, os
-STATE=os.environ["MOCK_STATE"]; POSTS=os.environ["MOCK_POSTS"]
+STATE=os.environ["MOCK_STATE"]; POSTS=os.environ["MOCK_POSTS"]; NF=os.environ["MOCK_NOFLAG"]
 class H(http.server.BaseHTTPRequestHandler):
     def _send(self, code, obj):
         b=json.dumps(obj).encode()
@@ -205,6 +211,8 @@ class H(http.server.BaseHTTPRequestHandler):
         n=int(self.headers.get("Content-Length",0)); body=self.rfile.read(n).decode()
         with open(POSTS,"a") as f: f.write(self.path+" "+body+"\n")
         if self.path=="/api/v1/start":
+            if os.path.exists(NF) and "enableUserWriteBlocking" in body:
+                self._send(400, {"error":"Unrecognized key in request: enableUserWriteBlocking"}); return
             s=self._state(); s["state"]="RUNNING"; self._save(s)
         elif self.path=="/api/v1/commit":
             self._save({"state":"COMMITTED","canCommit":False,"canWrite":True,"lagTimeSeconds":0})
@@ -213,7 +221,7 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self,*a): pass
 http.server.ThreadingHTTPServer(("127.0.0.1",18100),H).serve_forever()
 PYEOF
-MOCK_STATE="$TMP/state.json" MOCK_POSTS="$TMP/posts" python3 "$TMP/mock.py" &
+MOCK_STATE="$TMP/state.json" MOCK_POSTS="$TMP/posts" MOCK_NOFLAG="$TMP/noflag" python3 "$TMP/mock.py" &
 MOCK_PID=$!
 sleep 1
 API=(--api-url http://127.0.0.1:18100)
@@ -230,6 +238,12 @@ grep -q "/api/v1/start" "$TMP/posts" && grep -q "enableUserWriteBlocking" "$TMP/
 mock_state '{"state":"IDLE","canCommit":false}'
 run "${CLEAN[@]}" "$S" "${API[@]}" start --no-write-blocking; rc_is 0 "m3b start accepted (no blocking)"
 grep -q "/api/v1/start" "$TMP/posts" && ! grep -q "enableUserWriteBlocking" "$TMP/posts" && ok "m3b POST omits enableUserWriteBlocking" || bad "m3b POST body"
+mock_state '{"state":"IDLE","canCommit":false}'
+: >"$TMP/noflag"
+run "${CLEAN[@]}" "$S" "${API[@]}" start; rc_is 0 "m15 start adapts when the flag is rejected (mongosync 1.20+)"
+has "dropped enableUserWriteBlocking" "m15 adaptation noted"
+[ "$(grep -c "enableUserWriteBlocking" "$TMP/posts")" = "1" ] && ok "m15 retry dropped the flag" || bad "m15 retry kept the flag"
+rm -f "$TMP/noflag"
 mock_state '{"state":"IDLE","canCommit":false}'
 run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m4 commit gated on canCommit"; has "canCommit=false" "m4 message"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":0}'

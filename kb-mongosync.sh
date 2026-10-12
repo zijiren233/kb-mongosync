@@ -47,6 +47,9 @@ RELEASE=""
 API_URL=""
 API_PORT=27180
 CHART="oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync"
+# mongosync version the chart's default image tag bundles; keep in sync with
+# charts/kb-mongosync/values.yaml (drives check's per-version source floors)
+DEFAULT_MSVER="1.16.0"
 CHART_VERSION=""
 CHART_DIR=""
 IMAGE=""
@@ -157,7 +160,13 @@ while [ $# -gt 0 ]; do
     --chart-version) need_value "$@"; CHART_VERSION="$2"; shift 2 ;;
     --chart-dir)     need_value "$@"; CHART_DIR="$2"; shift 2 ;;
     --image)         need_value "$@"; IMAGE="$2"; shift 2 ;;
-    --mongosync-version) need_value "$@"; MSYNC_VER="$2"; shift 2 ;;
+    --mongosync-version)
+      need_value "$@"
+      case "$2" in
+        [0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) MSYNC_VER="$2" ;;
+        *) die "--mongosync-version must look like X.Y or X.Y.Z (got '$2')" ;;
+      esac
+      shift 2 ;;
     --set)           need_value "$@"; SETOPT+=(--set "$2"); shift 2 ;;
     --api-url)       need_value "$@"; API_URL="$2"; shift 2 ;;
     --port)          need_value "$@"; API_PORT="$2"; shift 2 ;;
@@ -493,24 +502,33 @@ print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
   fi
 
   if [ -n "$src_ver" ] && [ -n "$dst_ver" ]; then
-    case "$(python3 -c '
+    sel="$DEFAULT_MSVER (chart default)"; [ -n "$MSYNC_VER" ] && sel="$MSYNC_VER"
+    # Floors verified live per build family: <=1.16.0 floors 6.0 sources at
+    # 6.0.17; 1.17.0+ floors 6.0 at 6.0.24 and 8.0 sources at 8.0.5; 1.20.0+
+    # additionally floors 8.0 destinations at 8.0.5.
+    verdict="$(python3 -c '
 import sys
 def v(x):
     try: return tuple(int(i) for i in x.split(".")[:3])
     except Exception: return (0,0,0)
-s, d = v(sys.argv[1]), v(sys.argv[2])
+m, s, d = v(sys.argv[1]), v(sys.argv[2]), v(sys.argv[3])
 if s < (6,0,0): print("bad-src")
-elif s < (6,0,17): print("low-src-patch")
+elif s[:2] == (6,0) and s < ((6,0,17) if m < (1,17,0) else (6,0,24)): print("low-src-patch:" + ("6.0.17" if m < (1,17,0) else "6.0.24"))
+elif s[:2] == (8,0) and m >= (1,17,0) and s < (8,0,5): print("low-src-patch:8.0.5")
 elif not ((7,0,0) <= d): print("bad-dst")
-else: print("ok")' "$src_ver" "$dst_ver")" in
-      ok)           : ;;
-      bad-src)      warn "mongosync requires source >= 6.0 (got $src_ver)"; fail=1 ;;
-      low-src-patch) warn "source $src_ver is below mongosync's 6.0 floor: every downloadable build (1.13.1-1.16.0, including the bundled one) requires source >= 6.0.17; patch-upgrade the source first (>= 6.0.24 also satisfies newer mongosync)"; fail=1 ;;
-      bad-dst)      warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
-      *)            warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
+elif d[:2] == (8,0) and m >= (1,20,0) and d < (8,0,5): print("low-dst-patch:8.0.5")
+else: print("ok")' "${MSYNC_VER:-$DEFAULT_MSVER}" "$src_ver" "$dst_ver")"
+    case "$verdict" in
+      ok)              : ;;
+      bad-src)         warn "mongosync requires source >= 6.0 (got $src_ver)"; fail=1 ;;
+      low-src-patch:*) warn "source $src_ver is below mongosync $sel's floor (${verdict#*:}); pick an older --mongosync-version or patch-upgrade the source"; fail=1 ;;
+      bad-dst)         warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
+      low-dst-patch:*) warn "destination $dst_ver is below mongosync $sel's floor (${verdict#*:}); pick an older --mongosync-version or patch-upgrade the destination"; fail=1 ;;
+      *)               warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
     esac
   fi
-  info "note: every published mongosync build (1.13.1-1.16.0) requires source >= 6.0.17 and destination 7.0/8.0"
+  info "note: source floors: 6.0 >= 6.0.17 and 8.0 >= 8.0.4 on mongosync <= 1.16.0; 6.0 >= 6.0.24 and 8.0 >= 8.0.5 on 1.17.0+"
+  info "note: mongosync 1.20.0+ also floors 8.0 destinations at 8.0.5 and dropped enableUserWriteBlocking (write blocking is automatic)"
 
   if [ -n "$SRC_NS" ]; then
     src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
@@ -590,10 +608,6 @@ else: print("ok")' "$src_ver" "$dst_ver")" in
 cmd_deploy() {
   local extra=() src_comp dst_comp
   [ -n "$IMAGE" ] && [ -n "$MSYNC_VER" ] && die "--image and --mongosync-version are mutually exclusive"
-  case "$MSYNC_VER" in
-    ""|[0-9]*.[0-9]*|[0-9]*.[0-9]*.[0-9]*) : ;;
-    *) die "--mongosync-version must look like X.Y or X.Y.Z (got '$MSYNC_VER')" ;;
-  esac
   [ -n "$MSYNC_VER" ] && extra+=(--set-string "image.tag=mongosync-${MSYNC_VER}")
   [ -n "$IMAGE" ] && extra+=(--set-string "image.tag=${IMAGE##*:}")
   [ -n "$CHART_VERSION" ] && [ -z "$CHART_DIR" ] && extra+=(--version "$CHART_VERSION")
@@ -669,6 +683,12 @@ cmd_start() {
   fi
   info "POST /api/v1/start {source: cluster0 -> destination: cluster1, enableUserWriteBlocking: $([ "$WB_OFF" -eq 1 ] && echo false || echo true)}"
   resp="$(api_post /api/v1/start "$body")"
+  if printf '%s' "$resp" | grep -q 'Unrecognized key in request: enableUserWriteBlocking'; then
+    # mongosync 1.20.0+ removed the flag and manages write blocking itself
+    info "mongosync 1.20.0+ dropped enableUserWriteBlocking; retrying without it (write blocking is automatic)"
+    body='{"source":"cluster0","destination":"cluster1"}'
+    resp="$(api_post /api/v1/start "$body")"
+  fi
   printf '%s' "$resp" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)

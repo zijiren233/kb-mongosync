@@ -60,9 +60,15 @@ helm install msync oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync --ve
 
 ## mongosync version
 
-Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0). Every mongosync build still downloadable (1.13.1-1.16.0) requires a 6.0 source at patch 6.0.17 or later and a 7.0/8.0 destination; `check` enforces this and asks the server directly (`db.version()`) when a Cluster CR carries no `serviceVersion` (old KubeBlocks format). Replica count of either cluster (1 or 3) requires no configuration change.
+Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0, the most permissive build). Every release also publishes side-by-side images for the other supported mongosync versions (1.13.1-1.22.0) as `mongosync-<version>` tags (default from `VERSION`, extras from `EXTRA_MONGOSYNC_VERSIONS` in `.github/workflows/docker.yml`). Select one at deploy time with `--mongosync-version 1.18.0`, or set `image.tag` in the chart. `check` enforces the selected version's floors and asks the server directly (`db.version()`) when a Cluster CR carries no `serviceVersion` (old KubeBlocks format). Replica count of either cluster (1 or 3) requires no configuration change.
 
-Each release also publishes side-by-side images for the other supported mongosync versions as `mongosync-<version>` tags (default from `VERSION`, extras from `EXTRA_MONGOSYNC_VERSIONS` in `.github/workflows/docker.yml`). Select one at deploy time with `--mongosync-version 1.15.0`, or set `image.tag` in the chart.
+Patch floors, verified live against real replica sets per build family (destinations must be 7.0/8.0 everywhere; 7.0-side floors are left to mongosync's own validation):
+
+| mongosync | 6.0 source | 8.0 source | 8.0 destination | start write blocking |
+|---|---|---|---|---|
+| 1.13.1 - 1.16.0 | >= 6.0.17 | 8.0.4 accepted | 8.0.4 accepted | `enableUserWriteBlocking` honored |
+| 1.17.0 - 1.19.0 | >= 6.0.24 | >= 8.0.5 | untested | flag honored |
+| 1.20.0 - 1.22.0 | >= 6.0.24 | >= 8.0.5 | >= 8.0.5 | flag removed; managed automatically |
 
 ## Permissions
 
@@ -74,7 +80,7 @@ CI reads `VERSION` plus `EXTRA_MONGOSYNC_VERSIONS`, verifies every upstream tarb
 
 ## Commit semantics
 
-- `start` sends `enableUserWriteBlocking: true` to mongosync by default (`--no-write-blocking` to opt out); 1.16.0 accepts it (`Mode: sourceAndDestination`).
+- `start` sends `enableUserWriteBlocking: true` to mongosync by default (`--no-write-blocking` to opt out); 1.16.0 accepts it (`Mode: sourceAndDestination`). mongosync 1.20.0+ removed the flag and manages write blocking itself; `start` detects the rejection and retries without it automatically.
 - With the flag on, mongosync write-blocks the source when it receives commit: ordinary application users get immediate "User writes blocked" errors from then on, and commit completes cleanly even with such a writer still running (verified live on 1.16.0: COMMITTED, zero fatals, a non-privileged 5/s writer rejected fail-fast from the commit POST onward). The docs still say to stop application writes before commit, and the quiet gate below enforces that.
 - The block does not fence privileged users: the built-in `root`, `restore` and `__system` roles hold `bypassWriteBlockingMode` and write straight through it (documented server behavior, verified live on 6.0.20). A write from such a user that lands after final verification begins still kills mongosync 1.16 fatally — reproduced with a root writer whose insert landed one oplog position after verification started. The quiet gate (or an explicit freeze) is what covers this residual case.
 - Recommended cutover: stop application writers (or `block --yes`, which sets the official user write block on the source — the same mechanism mongosync itself uses; application writes fail fast with "User writes blocked", engagement verified by a probe write from a short-lived unprivileged user, since root bypasses the block) -> `commit --yes` -> switch the app to the destination -> `unblock --yes`. The manual block persists after the setting process exits (verified live past four minutes).

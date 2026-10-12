@@ -36,7 +36,7 @@ jobs:
       - name: Assemble mongosync version matrix
         id: versions
         env:
-          EXTRA_MONGOSYNC_VERSIONS: ${{ vars.EXTRA_MONGOSYNC_VERSIONS || '"1.15.0", "1.14.0", "1.13.1"' }}
+          EXTRA_MONGOSYNC_VERSIONS: ${{ vars.EXTRA_MONGOSYNC_VERSIONS || '"1.22.0", "1.21.0", "1.20.0", "1.19.0", "1.18.0", "1.17.0", "1.15.0", "1.14.0", "1.13.1"' }}
         run: |
           default="$(tr -d '[:space:]' < VERSION)"
           [ -n "$default" ] || { echo "VERSION file is empty" >&2; exit 1; }

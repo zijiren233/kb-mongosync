@@ -1,7 +1,7 @@
 image:
   repository: ghcr.io/zijiren233/kb-mongosync
-  # every release publishes one tag per mongosync version, e.g. mongosync-1.15.0
-  # (full list: EXTRA_MONGOSYNC_VERSIONS in .github/workflows/docker.yml)
+  # every release publishes one tag per mongosync version (1.13.1-1.22.0 today,
+  # full list: EXTRA_MONGOSYNC_VERSIONS in .github/workflows/docker.yml)
   tag: "mongosync-1.16.0"
 
 nameOverride: ""
