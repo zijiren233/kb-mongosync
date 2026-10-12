@@ -60,9 +60,9 @@ helm install msync oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync --ve
 
 ## mongosync version
 
-Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0, the most permissive build). Every release also publishes side-by-side images for the other supported mongosync versions (1.13.1-1.22.0) as `mongosync-<version>` tags (default from `VERSION`, extras from `EXTRA_MONGOSYNC_VERSIONS` in `.github/workflows/docker.yml`). Select one at deploy time with `--mongosync-version 1.18.0`, or set `image.tag` in the chart. `check` enforces the selected version's floors and asks the server directly (`db.version()`) when a Cluster CR carries no `serviceVersion` (old KubeBlocks format). Replica count of either cluster (1 or 3) requires no configuration change.
+Pinned in `VERSION` and `charts/kb-mongosync/values.yaml` (currently 1.16.0, the most permissive build). Every release also publishes side-by-side images for the other supported mongosync versions (1.13.1-1.22.0) as `mongosync-<version>` tags (default from `VERSION`, extras from `EXTRA_MONGOSYNC_VERSIONS` in `.github/workflows/docker.yml`). Select one at deploy time with `--mongosync-version 1.18.0`, or set `image.tag` in the chart. `check` resolves and displays both versions (asking the server directly via `db.version()` when a Cluster CR carries no `serviceVersion`, old KubeBlocks format) but does not gate on them: mongosync itself validates versions at `/start` and rejects incompatible combinations naming the exact patch required. Replica count of either cluster (1 or 3) requires no configuration change.
 
-Patch floors, verified live against real replica sets per build family (destinations must be 7.0/8.0 everywhere; 7.0-side floors are left to mongosync's own validation):
+Patch floors, verified live against real replica sets per build family and kept here as documentation — mongosync enforces them authoritatively at `/start` (7.0-side floors likewise):
 
 | mongosync | 6.0 source | 8.0 source | 8.0 destination | start write blocking |
 |---|---|---|---|---|

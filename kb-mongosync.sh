@@ -47,9 +47,6 @@ RELEASE=""
 API_URL=""
 API_PORT=27180
 CHART="oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync"
-# mongosync version the chart's default image tag bundles; keep in sync with
-# charts/kb-mongosync/values.yaml (drives check's per-version source floors)
-DEFAULT_MSVER="1.16.0"
 CHART_VERSION=""
 CHART_DIR=""
 IMAGE=""
@@ -486,49 +483,25 @@ print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
     info "destination: static URI (phase/version/emptiness checks skipped)"
   fi
 
+  # Version facts only. mongosync is the authority: it validates versions,
+  # topology and emptiness at /start and rejects bad combinations with the
+  # exact patch required. Encoding its floors here would rot with every
+  # release; the README keeps the verified table as documentation.
   if [ -n "$SRC_NS" ] && [ -z "$src_ver" ]; then
     out="$(live_db_version "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
     case "$out" in
       [0-9]*.[0-9]*.[0-9]*) src_ver="$out"; info "source:      server reports version $src_ver" ;;
-      *) warn "cannot determine source version (Cluster carries no serviceVersion, live query failed)"; fail=1 ;;
+      *) warn "cannot determine source version (Cluster carries no serviceVersion, live query failed); mongosync validates versions at start" ;;
     esac
   fi
   if [ -n "$DST_NS" ] && [ -z "$dst_ver" ]; then
     out="$(live_db_version "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
     case "$out" in
       [0-9]*.[0-9]*.[0-9]*) dst_ver="$out"; info "destination: server reports version $dst_ver" ;;
-      *) warn "cannot determine destination version (Cluster carries no serviceVersion, live query failed)"; fail=1 ;;
+      *) warn "cannot determine destination version (Cluster carries no serviceVersion, live query failed); mongosync validates versions at start" ;;
     esac
   fi
-
-  if [ -n "$src_ver" ] && [ -n "$dst_ver" ]; then
-    sel="$DEFAULT_MSVER (chart default)"; [ -n "$MSYNC_VER" ] && sel="$MSYNC_VER"
-    # Floors verified live per build family: <=1.16.0 floors 6.0 sources at
-    # 6.0.17; 1.17.0+ floors 6.0 at 6.0.24 and 8.0 sources at 8.0.5; 1.20.0+
-    # additionally floors 8.0 destinations at 8.0.5.
-    verdict="$(python3 -c '
-import sys
-def v(x):
-    try: return tuple(int(i) for i in x.split(".")[:3])
-    except Exception: return (0,0,0)
-m, s, d = v(sys.argv[1]), v(sys.argv[2]), v(sys.argv[3])
-if s < (6,0,0): print("bad-src")
-elif s[:2] == (6,0) and s < ((6,0,17) if m < (1,17,0) else (6,0,24)): print("low-src-patch:" + ("6.0.17" if m < (1,17,0) else "6.0.24"))
-elif s[:2] == (8,0) and m >= (1,17,0) and s < (8,0,5): print("low-src-patch:8.0.5")
-elif not ((7,0,0) <= d): print("bad-dst")
-elif d[:2] == (8,0) and m >= (1,20,0) and d < (8,0,5): print("low-dst-patch:8.0.5")
-else: print("ok")' "${MSYNC_VER:-$DEFAULT_MSVER}" "$src_ver" "$dst_ver")"
-    case "$verdict" in
-      ok)              : ;;
-      bad-src)         warn "mongosync requires source >= 6.0 (got $src_ver)"; fail=1 ;;
-      low-src-patch:*) warn "source $src_ver is below mongosync $sel's floor (${verdict#*:}); pick an older --mongosync-version or patch-upgrade the source"; fail=1 ;;
-      bad-dst)         warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
-      low-dst-patch:*) warn "destination $dst_ver is below mongosync $sel's floor (${verdict#*:}); pick an older --mongosync-version or patch-upgrade the destination"; fail=1 ;;
-      *)               warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
-    esac
-  fi
-  info "note: source floors: 6.0 >= 6.0.17 and 8.0 >= 8.0.4 on mongosync <= 1.16.0; 6.0 >= 6.0.24 and 8.0 >= 8.0.5 on 1.17.0+"
-  info "note: mongosync 1.20.0+ also floors 8.0 destinations at 8.0.5 and dropped enableUserWriteBlocking (write blocking is automatic)"
+  info "note: mongosync validates cluster versions itself at /start (authoritative); published-build floors: README compatibility table"
 
   if [ -n "$SRC_NS" ]; then
     src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"

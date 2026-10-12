@@ -82,11 +82,12 @@ case "$1" in
         if printf '%s' "$args" | grep -q username; then echo "dXNlcg=="; else echo "cGFzcw=="; fi ;;
     esac ;;
   exec)
-    if [ -f "${FAKE}/exec-fail" ]; then exit 1; fi
     js="${stdin_data} ${args}"
     case "$js" in
+      *"db.version()"*)
+        [ -f "${FAKE}/ver-fail" ] && exit 1
+        cat "${FAKE}/live-ver" ;;
       *"isWritablePrimary"*) echo true ;;
-      *"db.version()"*) cat "${FAKE}/live-ver" ;;
       *"arbiterOnly"*) echo 0 ;;
       *"listCollections"*) : ;;
       *"getDBNames"*) printf '\nmeta:\n' ;;
@@ -111,22 +112,17 @@ CK=(--kubeconfig "$TMP/home/.kube/config" --src-ns n --src-cluster srccl --dst-n
 FE=(env PATH="$TMP/fakebin:$PATH" FAKE_DIR="$FAKE")
 mkcluster srccl 6.0.9; mkcluster dstcl 8.0.4
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
-rc_is 1 "t35 source below the 6.0.17 floor fails"; has "below mongosync 1.16.0" "t35 floor message"; has "floor \(6\.0\.17\)" "t35 names the floor"; has "patch-upgrade the source" "t35 remedy named"
+rc_is 0 "t35 version floors delegated to mongosync (no local gate)"; has "serviceVersion=6\.0\.9" "t35 versions displayed"; has "mongosync validates cluster versions itself at /start" "t35 authority noted"
 mkcluster srccl ""
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
-rc_is 1 "t36 missing serviceVersion falls back to live query"; has "asking the server" "t36 fallback noted"; has "server reports version 6.0.9" "t36 live version used"; has "floor \(6\.0\.17\)" "t36 floor still enforced"
-touch "$FAKE/exec-fail"
+rc_is 0 "t36 missing serviceVersion falls back to live query"; has "asking the server" "t36 fallback noted"; has "server reports version 6\.0\.9" "t36 live version used"; has "check passed" "t36 still passes"
+touch "$FAKE/ver-fail"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
-rc_is 1 "t37 live query failure is fail-closed"; has "cannot determine source version" "t37 message"
-rm -f "$FAKE/exec-fail"
+rc_is 0 "t37 unknown version is a warning, not a gate"; has "cannot determine source version" "t37 message"; has "mongosync validates versions at start" "t37 defers to mongosync"
+rm -f "$FAKE/ver-fail"
 mkcluster srccl 6.0.20
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
 rc_is 0 "t38 compliant versions pass"; has "check passed" "t38 passed"
-run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" --mongosync-version 1.22.0 check
-rc_is 1 "t43 newer mongosync raises the 6.0 floor"; has "floor \(6\.0\.24\)" "t43 6.0.24 floor"; has "1\.22\.0" "t43 selected version named"
-mkcluster srccl 8.0.5; mkcluster dstcl 8.0.4
-run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" --mongosync-version 1.21.0 check
-rc_is 1 "t44 mongosync 1.20+ floors 8.0 destinations"; has "destination 8\.0\.4 is below" "t44 dst floor message"; has "floor \(8\.0\.5\)" "t44 names the floor"
 mkcluster srccl 6.0.20
 
 echo "== deploy mongosync version selection =="
