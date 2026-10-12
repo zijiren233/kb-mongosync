@@ -102,7 +102,8 @@ Subcommands:
   wait        wait for a condition (--for)
   verify      compare counts and dbHash on both sides (auto mode)
   inspect     show write rate, oplog quiescence, active writers, write-block
-              state and inventory of the source (--dst: destination)  commit      commit the migration (source write-blocked, then COMMITTED)
+              state and inventory of the source (--dst: destination)
+  commit      commit the migration (source write-blocked, then COMMITTED)
   block       fence the source against application writes now (pre-cutover step;
               writes fail fast until unblock)
   unblock     release the source write block (auto mode)
