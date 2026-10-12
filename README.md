@@ -24,11 +24,17 @@ kubectl exec -it <pod> -- kb-mongosync status
 kubectl exec -it <pod> -- kb-mongosync commit --yes
 ```
 
-## Manual mode
+## Manual and hybrid sides
 
-Provide both endpoints yourself; nothing is discovered in-cluster and no ServiceAccount is created. Pair with `--api-url` to drive a release without kubectl.
+Each side is configured independently: `--src-ns/--src-cluster` (or `--dst-ns/--dst-cluster`) selects a KubeBlocks-discovered side, `--source-uri` (or `--destination-uri`) selects a static address. Both static is manual mode (no discovery, no ServiceAccount); one of each is hybrid — RBAC is created only for the cluster side, `check` only checks cluster sides, and `verify`/`block`/`unblock` need the source as a cluster side (with a static source, fence it yourself with `setUserWriteBlockMode`).
 
 ```bash
+# hybrid: static source, KubeBlocks destination
+./kb-mongosync.sh --kubeconfig ~/kubeconfigs/migrator.yaml \
+  --source-uri 'mongodb://user:pass@host1:27017,host2:27017/?replicaSet=rs0' \
+  --dst-ns <ns> --dst-cluster <dst> run
+
+# full manual: both static
 ./kb-mongosync.sh --namespace <ns> \
   --source-uri 'mongodb://user:pass@host1:27017,host2:27017/?replicaSet=rs0' \
   --destination-uri 'mongodb://user:pass@host3:27017/?replicaSet=rs1' \

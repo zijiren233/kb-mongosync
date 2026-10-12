@@ -121,11 +121,27 @@ AN "c21 bad uri scheme rejected" 'render rel-ns --set source.uri=foo://x --set d
 A "c21 error mentions scheme" 'grep -q "must start with mongodb://" "$TMP/err"'
 
 echo "== c15-c17 invalid configurations must fail =="
-AN "c15 one uri only rejected" 'render rel-ns --set source.uri=mongodb://a'
-A "c15 error mentions both uris" 'grep -q "needs both source.uri and destination.uri" "$TMP/err"'
+AN "c15 one uri side without the other cluster fields rejected" 'render rel-ns --set source.uri=mongodb://a'
+A "c15 error mentions the incomplete side" 'grep -q "destination needs either uri or namespace+cluster" "$TMP/err"'
 AN "c16 empty config rejected" 'render rel-ns'
-A "c16 error mentions required fields" 'grep -q "needs source.namespace/cluster" "$TMP/err"'
+A "c16 error mentions the incomplete side" 'grep -q "needs either uri or namespace+cluster" "$TMP/err"'
 AN "c17 sa mode missing destination cluster rejected" 'render rel-ns --set source.namespace=a --set source.cluster=x --set destination.namespace=b'
+
+echo "== c23 hybrid: static source uri + discovered destination =="
+render rel-ns --set source.uri=mongodb://u:p@a/?replicaSet=r0 \
+  --set destination.namespace=dst-ns --set destination.cluster=mg8 || { bad "c23 render"; }
+A "c23 source uri env from secret" 'grep -q "KBMS_SOURCE_URI" "$TMP/out.yaml" && ! grep -q "KBMS_SOURCE_NAMESPACE" "$TMP/out.yaml"'
+A "c23 destination cluster env" 'grep -q "KBMS_DESTINATION_NAMESPACE" "$TMP/out.yaml" && ! grep -q "KBMS_DESTINATION_URI" "$TMP/out.yaml"'
+A "c23 secret carries sourceUri only" 'grep -q "^  sourceUri:" "$TMP/out.yaml" && ! grep -q "^  destinationUri:" "$TMP/out.yaml"'
+A "c23 Role only in destination ns" '[ "$(objs | awk "\$1==\"Role\"{print \$2}" | sort | paste -sd, -)" = "dst-ns" ]'
+
+echo "== c24 hybrid: discovered source + static destination uri =="
+render rel-ns --set source.namespace=src-ns --set source.cluster=mg6 \
+  --set destination.uri=mongodb://u:p@b/?replicaSet=r1 || { bad "c24 render"; }
+A "c24 source cluster env" 'grep -q "KBMS_SOURCE_NAMESPACE" "$TMP/out.yaml" && ! grep -q "KBMS_SOURCE_URI" "$TMP/out.yaml"'
+A "c24 destination uri env from secret" 'grep -q "KBMS_DESTINATION_URI" "$TMP/out.yaml" && ! grep -q "KBMS_DESTINATION_NAMESPACE" "$TMP/out.yaml"'
+A "c24 secret carries destinationUri only" 'grep -q "^  destinationUri:" "$TMP/out.yaml" && ! grep -q "^  sourceUri:" "$TMP/out.yaml"'
+A "c24 Role only in source ns" '[ "$(objs | awk "\$1==\"Role\"{print \$2}" | sort | paste -sd, -)" = "src-ns" ]'
 
 printf '\nchart-matrix: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

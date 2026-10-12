@@ -28,9 +28,9 @@ run "${CLEAN[@]}" "$S";                            rc_is 1 "t02 no subcommand ex
 run "${CLEAN[@]}" "$S" --bogus status;             rc_is 1 "t03 unknown option"; has "unknown option" "t03 message"
 run "${CLEAN[@]}" "$S" status start;               rc_is 1 "t04 two subcommands"; has "only one subcommand" "t04 message"
 run "${CLEAN[@]}" "$S" status --port;              rc_is 1 "t05 option without value"; has "requires a value" "t05 message"
-run "${CLEAN[@]}" "$S" --src-cluster a --dst-ns b --dst-cluster c deploy; rc_is 1 "t06 auto mode missing --src-ns"; has "missing --src-ns" "t06 message"
-run "${CLEAN[@]}" "$S" --src-ns a --dst-ns b --dst-cluster c deploy;      rc_is 1 "t07 auto mode missing --src-cluster"; has "missing --src-cluster" "t07 message"
-run "${CLEAN[@]}" "$S" --source-uri mongodb://a deploy; rc_is 1 "t08 half manual uris"; has "manual mode needs both" "t08 message"
+run "${CLEAN[@]}" "$S" --src-cluster a --dst-ns b --dst-cluster c deploy; rc_is 1 "t06 source side missing ns"; has "source side needs both" "t06 message"
+run "${CLEAN[@]}" "$S" --src-ns a --dst-ns b --dst-cluster c deploy;      rc_is 1 "t07 source side missing cluster"; has "source side needs both" "t07 message"
+run "${CLEAN[@]}" "$S" --source-uri mongodb://a deploy; rc_is 1 "t08 dst side missing entirely"; has "missing --dst-ns" "t08 message"
 
 echo "== kubeconfig resolution =="
 run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/nope" status; rc_is 1 "t09 explicit missing kubeconfig"; has "kubeconfig not found" "t09 message"
@@ -44,7 +44,7 @@ run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" status; rc_is 1 "t1
 
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"
-run env -u KUBECONFIG KBMS_SOURCE_URI=mongodb://a "$S" render-conf; rc_is 1 "t15 half uri env"; has "needs both KBMS_SOURCE_URI" "t15 message"
+run env -u KUBECONFIG KBMS_SOURCE_URI=mongodb://a "$S" render-conf; rc_is 1 "t15 dst env missing"; has "destination side needs" "t15 message"
 run "${CLEAN[@]}" env KBMS_SOURCE_URI="mongodb://u:p@a/?replicaSet=r0" KBMS_DESTINATION_URI="mongodb://u:p@b/?replicaSet=r1" "$S" render-conf
 rc_is 0 "t16 manual env renders"; has '"port": 27180' "t16 default port"; has '"verbosity": "INFO"' "t16 default verbosity"
 run "${CLEAN[@]}" env KBMS_SOURCE_URI=mongodb://a KBMS_DESTINATION_URI=mongodb://b KBMS_PORT=2999 KBMS_VERBOSITY=TRACE "$S" render-conf
@@ -54,12 +54,22 @@ rc_is 1 "t18 sa env without kubectl fails"; hasnt '"cluster0"' "t18 no config pr
 
 echo "== manual-mode gates =="
 URI_ARGS=(--source-uri mongodb://a --destination-uri mongodb://b)
-run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" verify;    rc_is 2 "t19 verify manual gate"; has "verify needs auto mode" "t19 hint"
-run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" unblock;   rc_is 2 "t20 unblock manual gate"; has "unblock needs auto mode" "t20 hint"
-run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" block;    rc_is 2 "t26 block manual gate"; has "block needs auto mode" "t26 hint"
+run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" verify;    rc_is 2 "t19 verify manual gate"; has "verify needs both sides" "t19 hint"
+run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" unblock;   rc_is 2 "t20 unblock manual gate"; has "unblock needs the source side" "t20 hint"
+run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" block;    rc_is 2 "t26 block manual gate"; has "block needs the source side" "t26 hint"
 run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" inspect;  rc_is 1 "t27 inspect manual gate"; has "inspect requires auto mode" "t27 message"
-run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" rbac;      rc_is 1 "t21 rbac manual gate"; has "rbac requires auto mode" "t21 message"
-run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" check;     rc_is 1 "t22 check manual gate"; has "check requires auto mode" "t22 message"
+run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" rbac;      rc_is 1 "t21 rbac without namespace"; has "rbac needs --namespace" "t21 message"
+run "${CLEAN[@]}" "$S" "${URI_ARGS[@]}" check;     rc_is 1 "t22 check manual gate"; has "check requires at least one cluster side" "t22 message"
+
+echo "== hybrid side resolution =="
+run "${CLEAN[@]}" "$S" --source-uri mongodb://a --src-ns n --dst-ns b --dst-cluster c deploy
+rc_is 1 "t28 source conflict rejected"; has "not both" "t28 message"
+run "${CLEAN[@]}" "$S" --source-uri mongodb://a --dst-ns b --dst-cluster c deploy
+rc_is 1 "t29 hybrid passes resolution (dies at dst discovery)"; has "destination component discovery failed" "t29 message"
+run "${CLEAN[@]}" env KBMS_SOURCE_URI="mongodb://u:p@a/?replicaSet=r0" KBMS_DESTINATION_NAMESPACE=b KBMS_DESTINATION_CLUSTER=y KBMS_DESTINATION_COMPONENT=mongodb "$S" render-conf
+rc_is 1 "t30 hybrid env: uri source accepted, dst side reaches discovery"; has "secret b/y-mongodb-account-root" "t30 dst discovery attempted"
+run "${CLEAN[@]}" env KBMS_SOURCE_NAMESPACE=a KBMS_SOURCE_CLUSTER=x KBMS_SOURCE_COMPONENT=mongodb KBMS_DESTINATION_URI="mongodb://u:p@b/?replicaSet=r1" "$S" render-conf
+rc_is 1 "t31 hybrid env: uri destination accepted, src side reaches discovery"; has "secret a/x-mongodb-account-root" "t31 src discovery attempted"
 
 echo "== uri and context validation =="
 run "${CLEAN[@]}" "$S" --source-uri foo://x --destination-uri mongodb://b deploy

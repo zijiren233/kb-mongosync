@@ -58,17 +58,12 @@ spec:
               value: {{ .Values.verbosity | quote }}
             - name: KBMS_PORT
               value: {{ .Values.port | quote }}
-            {{- if and .Values.source.uri .Values.destination.uri }}
+            {{- if .Values.source.uri }}
             - name: KBMS_SOURCE_URI
               valueFrom:
                 secretKeyRef:
                   name: {{ include "kb-mongosync.fullname" . }}-conf
                   key: sourceUri
-            - name: KBMS_DESTINATION_URI
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "kb-mongosync.fullname" . }}-conf
-                  key: destinationUri
             {{- else }}
             - name: KBMS_SOURCE_NAMESPACE
               value: {{ .Values.source.namespace | quote }}
@@ -78,6 +73,14 @@ spec:
             - name: KBMS_SOURCE_COMPONENT
               value: {{ . | quote }}
             {{- end }}
+            {{- end }}
+            {{- if .Values.destination.uri }}
+            - name: KBMS_DESTINATION_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kb-mongosync.fullname" . }}-conf
+                  key: destinationUri
+            {{- else }}
             - name: KBMS_DESTINATION_NAMESPACE
               value: {{ .Values.destination.namespace | quote }}
             - name: KBMS_DESTINATION_CLUSTER

@@ -57,6 +57,8 @@ ASSUME_YES=0
 FORCE=0
 WB_OFF=0
 INSPECT_DST=0
+SRC_MODE=""
+DST_MODE=""
 
 SUBCMD=""
 WAIT_FOR="copy"
@@ -66,12 +68,13 @@ usage() {
   cat <<'EOF'
 kb-mongosync: migrate MongoDB clusters via mongosync (Helm-deployed)
 
-Input mode (choose one):
-  auto:   --src-ns NS --src-cluster NAME --dst-ns NS --dst-cluster NAME
-          connection strings are discovered from KubeBlocks via kubectl
-  manual: --source-uri URI --destination-uri URI
-          no kubectl discovery; pair with --api-url to drive an existing
-          release, or with --namespace/-chart options to install one
+Input sides (each side independently, mixing is allowed):
+  cluster side:  --src-ns NS --src-cluster NAME (and --dst-ns/--dst-cluster)
+                 connection strings discovered from KubeBlocks via kubectl
+  static side:   --source-uri URI / --destination-uri URI
+                 no kubectl discovery for that side
+  both static = manual mode; both cluster = auto mode; one of each = hybrid
+  (RBAC is only created for cluster sides)
 
 Options:
   --kubeconfig PATH       kubeconfig for kubectl/helm (default $KUBECONFIG)
@@ -168,30 +171,42 @@ done
 
 # Only subcommands that touch KubeBlocks clusters or build chart values need a
 # full input mode; API-driving subcommands work standalone (also in-pod).
+# Each side resolves independently: a static URI or a namespace+cluster pair;
+# mixing the two (hybrid) is allowed. RBAC is only created for cluster sides.
 case "$SUBCMD" in
   check|deploy|verify|block|unblock|rbac|run)
-    if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
-      [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
+    if [ -n "$SRC_URI" ]; then
+      [ -z "$SRC_NS" ] && [ -z "$SRC_CLUSTER" ] || die "source: pass either --source-uri or --src-ns/--src-cluster, not both"
       validate_uri --source-uri "$SRC_URI"
-      validate_uri --destination-uri "$DST_URI"
-      MODE=manual
+      SRC_MODE=uri
+    elif [ -n "$SRC_NS" ] && [ -n "$SRC_CLUSTER" ]; then
+      SRC_MODE=cluster
+    elif [ -z "$SRC_NS" ] && [ -z "$SRC_CLUSTER" ]; then
+      die "missing --src-ns (or use --source-uri for a static source)"
     else
-      [ -n "$SRC_NS" ]     || die "missing --src-ns (or use --source-uri manual mode)"
-      [ -n "$SRC_CLUSTER" ]|| die "missing --src-cluster"
-      [ -n "$DST_NS" ]     || die "missing --dst-ns"
-      [ -n "$DST_CLUSTER" ]|| die "missing --dst-cluster"
-      MODE=auto
+      die "source side needs both --src-ns and --src-cluster"
+    fi
+    if [ -n "$DST_URI" ]; then
+      [ -z "$DST_NS" ] && [ -z "$DST_CLUSTER" ] || die "destination: pass either --destination-uri or --dst-ns/--dst-cluster, not both"
+      validate_uri --destination-uri "$DST_URI"
+      DST_MODE=uri
+    elif [ -n "$DST_NS" ] && [ -n "$DST_CLUSTER" ]; then
+      DST_MODE=cluster
+    elif [ -z "$DST_NS" ] && [ -z "$DST_CLUSTER" ]; then
+      die "missing --dst-ns (or use --destination-uri for a static destination)"
+    else
+      die "destination side needs both --dst-ns and --dst-cluster"
+    fi
+    if [ "$SRC_MODE" = uri ] && [ "$DST_MODE" = uri ]; then MODE=manual
+    elif [ "$SRC_MODE" = cluster ] && [ "$DST_MODE" = cluster ]; then MODE=auto
+    else MODE=hybrid
     fi
     ;;
 esac
 if [ -z "$RELEASE" ]; then
-  if [ -n "$SRC_CLUSTER" ] && [ -n "$DST_CLUSTER" ]; then
-    RELEASE="msync-${SRC_CLUSTER}-to-${DST_CLUSTER}"
-  else
-    RELEASE="msync-manual"
-  fi
+  RELEASE="msync-${SRC_CLUSTER:-manual}-to-${DST_CLUSTER:-manual}"
 fi
-[ -n "$NAMESPACE" ] || NAMESPACE="$SRC_NS"
+[ -n "$NAMESPACE" ] || NAMESPACE="${SRC_NS:-${DST_NS:-}}"
 
 case "$SUBCMD" in
   deploy|teardown) command -v helm >/dev/null 2>&1 || die "missing dependency: helm" ;;
@@ -395,26 +410,37 @@ chart_ref() {
 }
 
 cmd_check() {
-  [ "$MODE" = auto ] || die "check requires auto mode (manual mode: verify your URIs yourself)"
+  [ -n "$SRC_NS" ] || [ -n "$DST_NS" ] \
+    || die "check requires at least one cluster side (full manual mode: verify your URIs yourself)"
   local fail=0 src_comp dst_comp src_phase dst_phase src_ver dst_ver dbs dst_primary src_primary meta out
-  src_phase="$(cluster_phase "$SRC_NS" "$SRC_CLUSTER")"
-  dst_phase="$(cluster_phase "$DST_NS" "$DST_CLUSTER")"
-  src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
-  dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
-
-  [ "$src_phase" = "Running" ] || { warn "source cluster phase=$src_phase (need Running)"; fail=1; }
-  [ "$dst_phase" = "Running" ] || { warn "destination cluster phase=$dst_phase (need Running)"; fail=1; }
-
-  src_ver="$(load_cluster "$SRC_NS" "$SRC_CLUSTER" | python3 -c '
+  if [ -n "$SRC_NS" ]; then
+    src_phase="$(cluster_phase "$SRC_NS" "$SRC_CLUSTER")"
+    src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
+    COMPONENT="$src_comp"
+    [ "$src_phase" = "Running" ] || { warn "source cluster phase=$src_phase (need Running)"; fail=1; }
+    src_ver="$(load_cluster "$SRC_NS" "$SRC_CLUSTER" | python3 -c '
 import json,sys; d=json.load(sys.stdin)
 print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
-  dst_ver="$(load_cluster "$DST_NS" "$DST_CLUSTER" | python3 -c '
+    info "source:      $SRC_NS/$SRC_CLUSTER component=$src_comp serviceVersion=$src_ver"
+  else
+    src_phase=""; src_comp=""; src_ver=""
+    info "source:      static URI (phase/version/arbiter/collection checks skipped)"
+  fi
+  if [ -n "$DST_NS" ]; then
+    dst_phase="$(cluster_phase "$DST_NS" "$DST_CLUSTER")"
+    dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
+    [ "$dst_phase" = "Running" ] || { warn "destination cluster phase=$dst_phase (need Running)"; fail=1; }
+    dst_ver="$(load_cluster "$DST_NS" "$DST_CLUSTER" | python3 -c '
 import json,sys; d=json.load(sys.stdin)
 print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
-  info "source:      $SRC_NS/$SRC_CLUSTER component=$src_comp serviceVersion=$src_ver"
-  info "destination: $DST_NS/$DST_CLUSTER component=$dst_comp serviceVersion=$dst_ver"
+    info "destination: $DST_NS/$DST_CLUSTER component=$dst_comp serviceVersion=$dst_ver"
+  else
+    dst_phase=""; dst_comp=""; dst_ver=""
+    info "destination: static URI (phase/version/emptiness checks skipped)"
+  fi
 
-  case "$(python3 -c '
+  if [ -n "$src_ver" ] && [ -n "$dst_ver" ]; then
+    case "$(python3 -c '
 import sys
 def v(x):
     try: return tuple(int(i) for i in x.split(".")[:3])
@@ -423,75 +449,84 @@ s, d = v(sys.argv[1]), v(sys.argv[2])
 if s < (6,0,0): print("bad-src")
 elif not ((7,0,0) <= d): print("bad-dst")
 else: print("ok")' "$src_ver" "$dst_ver")" in
-    ok)       : ;;
-    bad-src)  warn "mongosync requires source >= 6.0 (got $src_ver)"; fail=1 ;;
-    bad-dst)  warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
-    *)        warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
-  esac
+      ok)       : ;;
+      bad-src)  warn "mongosync requires source >= 6.0 (got $src_ver)"; fail=1 ;;
+      bad-dst)  warn "mongosync requires destination 7.0/8.0 (got $dst_ver)"; fail=1 ;;
+      *)        warn "unparseable version (src=$src_ver dst=$dst_ver)"; fail=1 ;;
+    esac
+  fi
   info "note: mongosync 1.17+ requires source >= 6.0.24; use 1.16.0 for older 6.0.x sources"
 
-  src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
-  if [ -z "$src_primary" ]; then
-    warn "no primary pod found on source cluster"
-    fail=1
-  else
-    out="$(mongosh_js "$SRC_NS" "$src_primary" "$src_comp" '
-      print(rs.conf().members.filter(function(m){return m.arbiterOnly}).length)')"
-    if [ "$out" = "0" ]; then
-      info "source: no arbiter members"
-    else
-      warn "source has $out arbiter member(s); mongosync refuses replica sets with arbiters"
-      fail=1
-    fi
-    out="$(mongosh_js "$SRC_NS" "$src_primary" "$src_comp" '
-      const bad=[];
-      for (const n of db.getMongo().getDBNames()) {
-        if (["admin","config","local"].includes(n)) continue;
-        const r=db.getSiblingDB(n).runCommand({listCollections:1, nameOnly:true, authorizedCollections:true});
-        for (const c of r.cursor.firstBatch)
-          if (c.type && c.type !== "collection") bad.push(n+"."+c.name+":"+c.type);
-      }
-      print(bad.join(","))')"
-    if [ -n "$out" ]; then
-      warn "non-plain collections on source (mongosync copies plain collections only): $out"
+  if [ -n "$SRC_NS" ]; then
+    src_primary="$(find_primary_pod "$SRC_NS" "$SRC_CLUSTER" "$src_comp" || true)"
+    if [ -z "$src_primary" ]; then
+      warn "no primary pod found on source cluster"
       fail=1
     else
-      info "source: plain collections only"
+      out="$(mongosh_js "$SRC_NS" "$src_primary" "$src_comp" '
+        print(rs.conf().members.filter(function(m){return m.arbiterOnly}).length)')"
+      if [ "$out" = "0" ]; then
+        info "source: no arbiter members"
+      else
+        warn "source has $out arbiter member(s); mongosync refuses replica sets with arbiters"
+        fail=1
+      fi
+      out="$(mongosh_js "$SRC_NS" "$src_primary" "$src_comp" '
+        const bad=[];
+        for (const n of db.getMongo().getDBNames()) {
+          if (["admin","config","local"].includes(n)) continue;
+          const r=db.getSiblingDB(n).runCommand({listCollections:1, nameOnly:true, authorizedCollections:true});
+          for (const c of r.cursor.firstBatch)
+            if (c.type && c.type !== "collection") bad.push(n+"."+c.name+":"+c.type);
+        }
+        print(bad.join(","))')"
+      if [ -n "$out" ]; then
+        warn "non-plain collections on source (mongosync copies plain collections only): $out"
+        fail=1
+      else
+        info "source: plain collections only"
+      fi
     fi
   fi
 
-  dst_primary="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
-  if [ -z "$dst_primary" ]; then
-    warn "no primary pod found on destination cluster"
-    fail=1
-  else
-    out="$(mongosh_js "$DST_NS" "$dst_primary" "$dst_comp" '
-      const names=db.getMongo().getDBNames();
-      const skip=["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"];
-      print(names.filter(function(n){return !skip.includes(n)}).join(","));
-      print("meta:"+names.filter(function(n){return ["__mdb_internal_mongosync","mongosync_reserved_for_internal_use"].includes(n)}).join(","))')"
-    dbs="$(printf '%s\n' "$out" | sed -n 1p)"
-    meta="$(printf '%s\n' "$out" | sed -n 2p | cut -d: -f2-)"
-    if [ -n "$dbs" ]; then
-      warn "destination not empty (user dbs: $dbs); full sync requires an empty destination"
+  if [ -n "$DST_NS" ]; then
+    dst_primary="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
+    if [ -z "$dst_primary" ]; then
+      warn "no primary pod found on destination cluster"
       fail=1
     else
-      info "destination is empty"
-    fi
-    if [ -n "$meta" ]; then
-      info "destination holds leftover mongosync metadata ($meta): deploying again resumes that sync; for a fresh start drop it or recreate the destination"
+      out="$(mongosh_js "$DST_NS" "$dst_primary" "$dst_comp" '
+        const names=db.getMongo().getDBNames();
+        const skip=["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"];
+        print(names.filter(function(n){return !skip.includes(n)}).join(","));
+        print("meta:"+names.filter(function(n){return ["__mdb_internal_mongosync","mongosync_reserved_for_internal_use"].includes(n)}).join(","))')"
+      dbs="$(printf '%s\n' "$out" | sed -n 1p)"
+      meta="$(printf '%s\n' "$out" | sed -n 2p | cut -d: -f2-)"
+      if [ -n "$dbs" ]; then
+        warn "destination not empty (user dbs: $dbs); full sync requires an empty destination"
+        fail=1
+      else
+        info "destination is empty"
+      fi
+      if [ -n "$meta" ]; then
+        info "destination holds leftover mongosync metadata ($meta): deploying again resumes that sync; for a fresh start drop it or recreate the destination"
+      fi
     fi
   fi
 
-  if build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp" >/dev/null 2>&1; then
-    info "source credentials ok"
-  else
-    warn "failed to read source credentials"; fail=1
+  if [ -n "$SRC_NS" ]; then
+    if build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp" >/dev/null 2>&1; then
+      info "source credentials ok"
+    else
+      warn "failed to read source credentials"; fail=1
+    fi
   fi
-  if build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp" >/dev/null 2>&1; then
-    info "destination credentials ok"
-  else
-    warn "failed to read destination credentials"; fail=1
+  if [ -n "$DST_NS" ]; then
+    if build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp" >/dev/null 2>&1; then
+      info "destination credentials ok"
+    else
+      warn "failed to read destination credentials"; fail=1
+    fi
   fi
 
   [ "$fail" -eq 0 ] && info "check passed" || die "check failed (see warnings above)"
@@ -504,31 +539,23 @@ cmd_deploy() {
   extra+=("${SETOPT[@]}")
 
   info "writing chart values (connection strings never logged)"
-  if [ "$MODE" = manual ]; then
-    cat > "$KB_TMP/values.yaml" <<EOF
-source:
-  uri: "${SRC_URI}"
-destination:
-  uri: "${DST_URI}"
-serviceAccount:
-  create: false
-rbac:
-  create: false
-EOF
-  else
-    src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")" || die "source component discovery failed"
-    dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")" || die "destination component discovery failed"
-    cat > "$KB_TMP/values.yaml" <<EOF
-source:
-  namespace: "${SRC_NS}"
-  cluster: "${SRC_CLUSTER}"
-  component: "${src_comp}"
-destination:
-  namespace: "${DST_NS}"
-  cluster: "${DST_CLUSTER}"
-  component: "${dst_comp}"
-EOF
-  fi
+  {
+    if [ "$SRC_MODE" = uri ]; then
+      printf 'source:\n  uri: "%s"\n' "$SRC_URI"
+    else
+      src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")" || die "source component discovery failed"
+      printf 'source:\n  namespace: "%s"\n  cluster: "%s"\n  component: "%s"\n' "$SRC_NS" "$SRC_CLUSTER" "$src_comp"
+    fi
+    if [ "$DST_MODE" = uri ]; then
+      printf 'destination:\n  uri: "%s"\n' "$DST_URI"
+    else
+      dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")" || die "destination component discovery failed"
+      printf 'destination:\n  namespace: "%s"\n  cluster: "%s"\n  component: "%s"\n' "$DST_NS" "$DST_CLUSTER" "$dst_comp"
+    fi
+    if [ "$MODE" = manual ]; then
+      printf 'serviceAccount:\n  create: false\nrbac:\n  create: false\n'
+    fi
+  } > "$KB_TMP/values.yaml"
   chmod 600 "$KB_TMP/values.yaml"
 
   info "helm upgrade --install $NAMESPACE/$RELEASE"
@@ -540,25 +567,23 @@ EOF
 
 # Render the mongosync config from the environment; used by the image
 # entrypoint (KBMS_* env vars set by the chart) and runnable by hand.
+# Each side resolves independently: KBMS_*_URI, or KBMS_*_NAMESPACE/CLUSTER.
 cmd_render_conf() {
   local src_uri="${KBMS_SOURCE_URI:-}" dst_uri="${KBMS_DESTINATION_URI:-}"
   local port="${KBMS_PORT:-27180}" verbosity="${KBMS_VERBOSITY:-INFO}"
-  if [ -z "$src_uri" ] || [ -z "$dst_uri" ]; then
-    [ -n "$src_uri$dst_uri" ] && die "manual mode needs both KBMS_SOURCE_URI and KBMS_DESTINATION_URI"
-    SRC_NS="${KBMS_SOURCE_NAMESPACE:-}"
-    SRC_CLUSTER="${KBMS_SOURCE_CLUSTER:-}"
-    DST_NS="${KBMS_DESTINATION_NAMESPACE:-}"
-    DST_CLUSTER="${KBMS_DESTINATION_CLUSTER:-}"
-    COMPONENT="${KBMS_SOURCE_COMPONENT:-}"
-    [ -n "$SRC_NS$SRC_CLUSTER$DST_NS$DST_CLUSTER" ] || die "no KBMS_* configuration found in environment"
-    [ -n "$SRC_NS" ] && [ -n "$SRC_CLUSTER" ] && [ -n "$DST_NS" ] && [ -n "$DST_CLUSTER" ] \
-      || die "incomplete KBMS_* cluster configuration"
-    local src_comp dst_comp
-    src_comp="$([ -n "$COMPONENT" ] && echo "$COMPONENT" || discover_component "$SRC_NS" "$SRC_CLUSTER")"
-    COMPONENT="${KBMS_DESTINATION_COMPONENT:-}"
-    dst_comp="$([ -n "$COMPONENT" ] && echo "$COMPONENT" || discover_component "$DST_NS" "$DST_CLUSTER")"
-    src_uri="$(build_uri "$SRC_NS" "$SRC_CLUSTER" "$src_comp")"
-    dst_uri="$(build_uri "$DST_NS" "$DST_CLUSTER" "$dst_comp")"
+  [ -n "$src_uri$dst_uri${KBMS_SOURCE_NAMESPACE:-}${KBMS_SOURCE_CLUSTER:-}${KBMS_DESTINATION_NAMESPACE:-}${KBMS_DESTINATION_CLUSTER:-}" ] \
+    || die "no KBMS_* configuration found in environment"
+  if [ -z "$src_uri" ]; then
+    [ -n "${KBMS_SOURCE_NAMESPACE:-}" ] && [ -n "${KBMS_SOURCE_CLUSTER:-}" ] \
+      || die "source side needs KBMS_SOURCE_URI or KBMS_SOURCE_NAMESPACE/CLUSTER"
+    src_uri="$(build_uri "${KBMS_SOURCE_NAMESPACE}" "${KBMS_SOURCE_CLUSTER}" \
+      "${KBMS_SOURCE_COMPONENT:-$(discover_component "${KBMS_SOURCE_NAMESPACE}" "${KBMS_SOURCE_CLUSTER}")}")"
+  fi
+  if [ -z "$dst_uri" ]; then
+    [ -n "${KBMS_DESTINATION_NAMESPACE:-}" ] && [ -n "${KBMS_DESTINATION_CLUSTER:-}" ] \
+      || die "destination side needs KBMS_DESTINATION_URI or KBMS_DESTINATION_NAMESPACE/CLUSTER"
+    dst_uri="$(build_uri "${KBMS_DESTINATION_NAMESPACE}" "${KBMS_DESTINATION_CLUSTER}" \
+      "${KBMS_DESTINATION_COMPONENT:-$(discover_component "${KBMS_DESTINATION_NAMESPACE}" "${KBMS_DESTINATION_CLUSTER}")}")"
   fi
   printf '{\n  "cluster0": "%s",\n  "cluster1": "%s",\n  "port": %s,\n  "verbosity": "%s",\n  "disableTelemetry": true\n}\n' \
     "$src_uri" "$dst_uri" "$port" "$verbosity"
@@ -645,10 +670,10 @@ print("yes" if t and c and int(c)>=int(t) else "no")')"
 }
 
 cmd_verify() {
-  if [ "$MODE" != auto ]; then
+  if [ "$SRC_MODE" != cluster ] || [ "$DST_MODE" != cluster ]; then
     cat <<'EOF'
-verify needs auto mode (it execs mongosh on the clusters).
-In manual mode compare both sides yourself, e.g. per database:
+verify needs both sides as KubeBlocks clusters (it execs mongosh on the pods).
+With a static URI side, compare both sides yourself, e.g. per database:
   db.runCommand({dbHash: 1, collections: db.getCollectionNames()})
 EOF
     exit 2
@@ -854,9 +879,10 @@ block_probe_js() { # "block" or "unblock"; verifies with a short-lived unprivile
 }
 
 cmd_block() {
-  if [ "$MODE" != auto ]; then
+  if [ "$SRC_MODE" != cluster ]; then
     cat <<'EOF'
-block needs auto mode. On the source primary run:
+block needs the source side as a KubeBlocks cluster. With a static source URI,
+fence it yourself on the source primary:
   db.adminCommand({setUserWriteBlockMode: 1, global: true})
 EOF
     exit 2
@@ -881,9 +907,10 @@ EOF
 }
 
 cmd_unblock() {
-  if [ "$MODE" != auto ]; then
+  if [ "$SRC_MODE" != cluster ]; then
     cat <<'EOF'
-unblock needs auto mode. On the source primary run:
+unblock needs the source side as a KubeBlocks cluster. With a static source
+URI, release it yourself on the source primary:
   db.adminCommand({setUserWriteBlockMode: 1, global: false})
 EOF
     exit 2
@@ -1012,7 +1039,7 @@ cmd_inspect() {
     label="source"
   fi
   [ -n "$ns" ] && [ -n "$cluster" ] \
-    || die "inspect needs the cluster coordinates (--src-ns/--src-cluster, or KBMS_* env in-pod)"
+    || die "inspect needs the $label cluster coordinates (--src-ns/--src-cluster or --dst-ns/--dst-cluster, or KBMS_* env in-pod)"
   if [ "$INSPECT_DST" -eq 1 ]; then
     comp="${KBMS_DESTINATION_COMPONENT:-$(discover_component "$ns" "$cluster")}"
   else
@@ -1050,10 +1077,7 @@ cmd_teardown() {
 }
 
 cmd_rbac() {
-  [ "$MODE" = auto ] || die "rbac requires auto mode"
-  local src_comp dst_comp
-  src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER" 2>/dev/null || echo "<component>")" || src_comp="<component>"
-  dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER" 2>/dev/null || echo "<component>")" || dst_comp="<component>"
+  [ -n "$NAMESPACE" ] || die "rbac needs --namespace"
   cat <<EOF
 # Least-privilege Role/RoleBinding for kb-mongosync.
 # The destination namespace needs the same Role.
