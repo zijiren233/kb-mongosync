@@ -93,7 +93,9 @@ case "$1" in
       *"arbiterOnly"*) echo 0 ;;
       *"listCollections"*) : ;;
       *"JSON.stringify"*) echo '{"bulk":{"collections":{"load0":{"count":100,"idx":1}}}}' ;;
-      *"getDBNames"*) printf '\nmeta:\n' ;;
+      *"getDBNames"*)
+        if [ -f "${FAKE}/dst-nonempty" ]; then printf 'otherdb\nmeta:\n'
+        else printf '\nmeta:\n'; fi ;;
     esac ;;
 esac
 exit 0
@@ -279,6 +281,19 @@ run "${CLEAN[@]}" "$S" "${API[@]}" start --no-embedded-verify; rc_is 0 "m19 star
 grep -q '"verification":{"enabled":false}' "$TMP/posts" && ok "m19 verification disabled in POST" || bad "m19 verification flag missing"
 mock_state '{"state":"IDLE","canCommit":false,"lagTimeSeconds":0}'
 run "${CLEAN[@]}" "$S" "${API[@]}" pause; rc_is 1 "m20 pause refused when IDLE"; has "requires RUNNING" "m20 message"
+mock_state '{"state":"IDLE","canCommit":false,"lagTimeSeconds":0}'
+: >"$TMP/posts"
+run "${CLEAN[@]}" "$S" "${API[@]}" start --include-ns sales --include-ns "hr,people,org"; rc_is 0 "m21 start with namespace filters"
+grep -o 'includeNamespaces.*' "$TMP/posts" | head -1 > "$TMP/m21body"
+grep -q '"includeNamespaces":\[{"database": "sales"}, {"database": "hr", "collections": \["people", "org"\]}\]' "$TMP/posts" && ok "m21 filter JSON correct" || { bad "m21 filter JSON wrong: $(cat "$TMP/m21body")"; }
+run "${CLEAN[@]}" "$S" "${API[@]}" start --include-ns a --exclude-ns b
+rc_is 1 "m22 mixing filters rejected"; has "mutually exclusive" "m22 message"
+: >"$FAKE/dst-nonempty"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
+rc_is 1 "t47 unfiltered check rejects non-empty destination"; has "destination not empty" "t47 message"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" --include-ns mydb check
+rc_is 0 "t47b filtered check allows non-empty destination"; has "outside the filter is allowed" "t47b note"
+rm -f "$FAKE/dst-nonempty"
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for bogus; rc_is 1 "m9 unknown --for"; has "unknown --for" "m9 message"
 mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"

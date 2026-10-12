@@ -60,6 +60,8 @@ WB_OFF=0
 INSPECT_DST=0
 COUNTS_ONLY=0
 NO_EVERIFY=0
+INCLUDE_NS=()
+EXCLUDE_NS=()
 SRC_MODE=""
 DST_MODE=""
 
@@ -105,6 +107,9 @@ Options:
     --no-embedded-verify    start with the embedded verifier off (correctness
                             then relies on your own verification; useful for
                             very large document counts)
+    --include-ns SPEC       sync only these namespaces (repeatable): 'db' or
+                            'db,coll1,coll2'; partial migration
+    --exclude-ns SPEC       sync everything except these namespaces (repeatable)
   --no-write-blocking     start without enableUserWriteBlocking (mongosync
                           then never blocks source writes during commit)
   -h | --help             show this help
@@ -183,6 +188,8 @@ while [ $# -gt 0 ]; do
     --force)         FORCE=1; shift ;;
     --counts-only)   COUNTS_ONLY=1; shift ;;
     --no-embedded-verify) NO_EVERIFY=1; shift ;;
+    --include-ns)   need_value "$@"; INCLUDE_NS+=("$2"); shift 2 ;;
+    --exclude-ns)   need_value "$@"; EXCLUDE_NS+=("$2"); shift 2 ;;
     --no-write-blocking) WB_OFF=1; shift ;;
     --dst)          INSPECT_DST=1; shift ;;
     -h|--help)       usage; exit 0 ;;
@@ -561,8 +568,12 @@ print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
       dbs="$(printf '%s\n' "$out" | sed -n 1p)"
       meta="$(printf '%s\n' "$out" | sed -n 2p | cut -d: -f2-)"
       if [ -n "$dbs" ]; then
-        warn "destination not empty (user dbs: $dbs); full sync requires an empty destination"
-        fail=1
+        if [ $(( ${#INCLUDE_NS[@]} + ${#EXCLUDE_NS[@]} )) -gt 0 ]; then
+          info "namespace filter active; pre-existing destination data outside the filter is allowed (mongosync validates overlaps at start)"
+        else
+          warn "destination not empty (user dbs: $dbs); full sync requires an empty destination"
+          fail=1
+        fi
       else
         info "destination is empty"
       fi
@@ -649,8 +660,31 @@ cmd_render_conf() {
     "$src_uri" "$dst_uri" "$port" "$verbosity"
 }
 
+# ,"includeNamespaces":[...] / ,"excludeNamespaces":[...] / "" for the /start body
+ns_filters_json() {
+  local kind specs
+  { [ ${#INCLUDE_NS[@]} -gt 0 ] && [ ${#EXCLUDE_NS[@]} -gt 0 ]; } \
+    && die "--include-ns and --exclude-ns are mutually exclusive"
+  [ ${#INCLUDE_NS[@]} -eq 0 ] && [ ${#EXCLUDE_NS[@]} -eq 0 ] && return 0
+  if [ ${#INCLUDE_NS[@]} -gt 0 ]; then kind=includeNamespaces; specs=("${INCLUDE_NS[@]}")
+  else kind=excludeNamespaces; specs=("${EXCLUDE_NS[@]}"); fi
+  python3 - "$kind" "${specs[@]}" <<'PY'
+import json,sys
+kind=sys.argv[1]; out=[]
+for spec in sys.argv[2:]:
+    parts=[p.strip() for p in spec.split(",") if p.strip()]
+    if not parts: continue
+    e={"database": parts[0]}
+    if len(parts) > 1: e["collections"]=parts[1:]
+    out.append(e)
+if not out: raise SystemExit("no valid namespace specs")
+print(',"%s":%s' % (kind, json.dumps(out)))
+PY
+}
+
 cmd_start() {
-  local state resp body ver=""
+  local state resp body ver="" ns
+  ns="$(ns_filters_json)"
   pf_up
   state="$(progress_field state)"
   case "$state" in
@@ -666,16 +700,16 @@ cmd_start() {
     warn "embedded verifier disabled; correctness relies on your own verification (verify / verify --counts-only)"
   fi
   if [ "$WB_OFF" -eq 1 ]; then
-    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\"$ver}"
+    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\"$ver$ns}"
   else
-    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\",\"enableUserWriteBlocking\":true$ver}"
+    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\",\"enableUserWriteBlocking\":true$ver$ns}"
   fi
   info "POST /api/v1/start {source: cluster0 -> destination: cluster1, enableUserWriteBlocking: $([ "$WB_OFF" -eq 1 ] && echo false || echo true)}"
   resp="$(api_post /api/v1/start "$body")"
   if printf '%s' "$resp" | grep -q 'Unrecognized key in request: enableUserWriteBlocking'; then
     # mongosync 1.20.0+ removed the flag and manages write blocking itself
     info "mongosync 1.20.0+ dropped enableUserWriteBlocking; retrying without it (write blocking is automatic)"
-    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\"$ver}"
+    body="{\"source\":\"cluster0\",\"destination\":\"cluster1\"$ver$ns}"
     resp="$(api_post /api/v1/start "$body")"
   fi
   printf '%s' "$resp" | python3 -c '
@@ -805,13 +839,28 @@ EOF
   [ -n "$sp" ] || die "no primary pod on source"
   [ -n "$dp" ] || die "no primary pod on destination"
   # counts-only mode reads collection metadata (fast at any size); the full
-  # mode additionally hashes every document on both sides
+  # mode additionally hashes every document on both sides; with a namespace
+  # filter only the filtered databases are compared
   local hashpart=""
   [ "$COUNTS_ONLY" = 1 ] || hashpart='hash: d.runCommand({dbHash: 1, collections: cols}).md5, '
+  local dbfilter=""
+  if [ ${#INCLUDE_NS[@]} -gt 0 ]; then
+    dbfilter="$(python3 -c '
+import json,sys
+print("const only=" + json.dumps([a.split(",")[0].strip() for a in sys.argv[1:]]) + ";")' "${INCLUDE_NS[@]}")"
+  elif [ ${#EXCLUDE_NS[@]} -gt 0 ]; then
+    dbfilter="$(python3 -c '
+import json,sys
+print("const only=" + json.dumps(["!" + a.split(",")[0].strip() for a in sys.argv[1:]]) + ";")' "${EXCLUDE_NS[@]}")"
+  fi
   local js='
+    '"$dbfilter"'
+    const skipDb = (n) => { if (typeof only === "undefined") return false;
+      return only.some(x => x[0] === "!" ? x.slice(1) === n : false) ? true : (!only.some(x => x[0] !== "!" && x === n)); };
     const out = {};
     for (const dbName of db.getMongo().getDBNames()) {
       if (["admin","config","local","__mdb_internal_mongosync","mongosync_reserved_for_internal_use"].includes(dbName)) continue;
+      if (skipDb(dbName)) continue;
       const d = db.getSiblingDB(dbName);
       const cols = d.getCollectionNames().filter(c => !c.startsWith("system."));
       out[dbName] = {'"$hashpart"'collections: {}};
