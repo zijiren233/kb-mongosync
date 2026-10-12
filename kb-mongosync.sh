@@ -168,7 +168,7 @@ done
 # Only subcommands that touch KubeBlocks clusters or build chart values need a
 # full input mode; API-driving subcommands work standalone (also in-pod).
 case "$SUBCMD" in
-  check|deploy|verify|inspect|block|unblock|rbac|run)
+  check|deploy|verify|block|unblock|rbac|run)
     if [ -n "$SRC_URI" ] || [ -n "$DST_URI" ]; then
       [ -n "$SRC_URI" ] && [ -n "$DST_URI" ] || die "manual mode needs both --source-uri and --destination-uri"
       validate_uri --source-uri "$SRC_URI"
@@ -996,11 +996,27 @@ inspect_inventory_js() {
 }
 
 cmd_inspect() {
-  [ "$MODE" = auto ] || die "inspect requires auto mode (manual mode: check local.oplog.rs and \$currentOp yourself)"
+  if [ -n "${SRC_URI:-}" ] || [ -n "${DST_URI:-}" ]; then
+    die "inspect requires auto mode (manual mode: check local.oplog.rs and \$currentOp yourself)"
+  fi
+  # coordinates from args on the laptop, from KBMS_* env in the release pod
   local ns cluster comp sp label out quiet
-  if [ "$INSPECT_DST" -eq 1 ]; then ns="$DST_NS"; cluster="$DST_CLUSTER"; label="destination"
-  else ns="$SRC_NS"; cluster="$SRC_CLUSTER"; label="source"; fi
-  comp="$(discover_component "$ns" "$cluster")"
+  if [ "$INSPECT_DST" -eq 1 ]; then
+    ns="${DST_NS:-${KBMS_DESTINATION_NAMESPACE:-}}"
+    cluster="${DST_CLUSTER:-${KBMS_DESTINATION_CLUSTER:-}}"
+    label="destination"
+  else
+    ns="${SRC_NS:-${KBMS_SOURCE_NAMESPACE:-}}"
+    cluster="${SRC_CLUSTER:-${KBMS_SOURCE_CLUSTER:-}}"
+    label="source"
+  fi
+  [ -n "$ns" ] && [ -n "$cluster" ] \
+    || die "inspect needs the cluster coordinates (--src-ns/--src-cluster, or KBMS_* env in-pod)"
+  if [ "$INSPECT_DST" -eq 1 ]; then
+    comp="${KBMS_DESTINATION_COMPONENT:-$(discover_component "$ns" "$cluster")}"
+  else
+    comp="${KBMS_SOURCE_COMPONENT:-$(discover_component "$ns" "$cluster")}"
+  fi
   sp="$(find_primary_pod "$ns" "$cluster" "$comp" || true)"
   [ -n "$sp" ] || die "no primary pod on $label cluster"
   info "inspecting $label: $ns/$cluster (primary $sp)"
