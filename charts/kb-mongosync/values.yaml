@@ -39,12 +39,12 @@ verbosity: INFO
 port: 27180
 
 resources:
-  # mongosync copy buffers hold up to 10k documents per partition in memory;
-  # large documents need headroom (verified: 64KB docs OOM at 2Gi, stable at
-  # 6Gi copying 15GB). Raise limits for large-document datasets.
-  limits:
-    cpu: "1"
-    memory: 2Gi
+  # mongosync memory scales with document size (copy buffers hold up to 10k
+  # docs per partition; verified: 64KB docs OOMKilled a 2Gi limit and looped
+  # the copy, stable at 6Gi copying 15GB). Limits are unset by default: a
+  # misjudged cap crashloops the migration, while an uncapped pod is just the
+  # first eviction candidate under node pressure. Set limits if your
+  # environment requires them (LimitRange, admission policy).
   requests:
     cpu: 200m
     memory: 512Mi
