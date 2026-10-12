@@ -702,11 +702,15 @@ cmd_wait() {
     lag="$(progress_field lagTimeSeconds)"
     case "$WAIT_FOR" in
       copy)
+        # canCommit implies the copy phase finished; empty sources report a
+        # placeholder 0/1 bytes that never satisfies the byte comparison
         ok="$(api_get_progress | python3 -c '
 import json,sys
-cc=json.load(sys.stdin)["progress"].get("collectionCopy") or {}
+p=json.load(sys.stdin)["progress"]
+cc=p.get("collectionCopy") or {}
 t=cc.get("estimatedTotalBytes"); c=cc.get("estimatedCopiedBytes")
-print("yes" if t and c and int(c)>=int(t) else "no")')"
+done=(t and c and int(c)>=int(t)) or str(p.get("canCommit")).lower()=="true"
+print("yes" if done else "no")')"
         [ "$ok" = "yes" ] && { info "collection copy complete"; return 0; } ;;
       lag)
         [ -n "$lag" ] && [ "$lag" -le 1 ] 2>/dev/null && { info "lag=${lag}s"; return 0; } ;;

@@ -249,6 +249,8 @@ grep -q "/api/v1/commit" "$TMP/posts" && ok "m6 commit POST issued" || bad "m6 c
 mock_state '{"state":"COMMITTED","canCommit":false,"canWrite":true}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for committed --timeout 5; rc_is 0 "m7 wait committed immediate"
 run "${CLEAN[@]}" "$S" "${API[@]}" commit; rc_is 0 "m8 commit after COMMITTED idempotent"; has "already COMMITTED" "m8 message"
+mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":0}'
+run "${CLEAN[@]}" "$S" "${API[@]}" wait --for copy --timeout 5; rc_is 0 "m16 wait copy completes for empty source (canCommit)"; has "collection copy complete" "m16 message"
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for bogus; rc_is 1 "m9 unknown --for"; has "unknown --for" "m9 message"
 mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"
