@@ -873,8 +873,14 @@ EOF
   src_comp="$(discover_component "$SRC_NS" "$SRC_CLUSTER")"
   dst_comp="$(discover_component "$DST_NS" "$DST_CLUSTER")"
   if kc get pod "$(release_pod)" -n "$NAMESPACE" >/dev/null 2>&1; then
-    local lag; lag="$(progress_field lagTimeSeconds)"
+    local lag vstate
+    vstate="$(progress_field state)"
+    lag="$(progress_field lagTimeSeconds)"
     [ "$lag" = "0" ] || warn "lag=${lag:-n/a}s (results may drift while the source is written)"
+    case "$vstate" in
+      COMMITTED|"") : ;;
+      *) warn "state=$vstate: counts drift while the sync is active (churned collections can differ in both directions); for a clean comparison stop the writers and commit first" ;;
+    esac
   else
     warn "release pod not found, skipping lag check (offline comparison)"
   fi
