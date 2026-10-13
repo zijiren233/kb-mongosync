@@ -19,4 +19,10 @@ if [ -n "${KUBERNETES_SERVICE_HOST:-}" ] && [ -d "$SA_DIR" ] && [ ! -s "$KC" ]; 
 fi
 
 kb-mongosync render-conf > "$CONF"
-exec mongosync --config "$CONF" --acceptDisclaimer
+# mongosync tries to mkdir ./metrics in its working directory and spews WRN
+# lines when that fails; progress is consumed via the API, so disable file
+# metrics when the build supports the flag.
+MSFLAGS="--acceptDisclaimer"
+mongosync --help 2>&1 | grep -q -- --disableMetricsLogging \
+  && MSFLAGS="$MSFLAGS --disableMetricsLogging"
+exec mongosync --config "$CONF" $MSFLAGS
