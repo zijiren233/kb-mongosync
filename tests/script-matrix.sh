@@ -202,12 +202,8 @@ run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify >/dev/null 2>&1
 grep -q "countDocuments" "$FAKE/execlog" && ok "t46 exact counts in full mode" || bad "t46 full mode lost exact counts"
 touch "$FAKE/est-drift"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only
-rc_is 0 "t45a fastcount drift passes after exact recheck"; has "fastcount drift only" "t45a drift noted"
+rc_is 1 "t45a estimate mismatch fails without rescans"; has "MISMATCH: db=bulk coll=load0" "t45a per-collection mismatch"; hasnt "countDocuments" "t45a no exact rescan issued"
 rm -f "$FAKE/est-drift"
-touch "$FAKE/est-drift" "$FAKE/real-diff"
-run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only
-rc_is 1 "t45b real count mismatch fails"; has "MISMATCH: db=bulk coll=load0" "t45b mismatch reported"; has "real count mismatch" "t45b reason"
-rm -f "$FAKE/est-drift" "$FAKE/real-diff"
 
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"
