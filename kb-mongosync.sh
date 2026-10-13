@@ -295,7 +295,8 @@ cluster_phase() { # ns name
 }
 
 discover_component() { # ns cluster
-  local cj; cj="$(load_cluster "$1" "$2")"
+  local cj; cj="$(load_cluster "$1" "$2")" || return 1
+  [ -n "$cj" ] || return 1
   if [ -n "$COMPONENT" ]; then
     printf '%s' "$COMPONENT"
   else
