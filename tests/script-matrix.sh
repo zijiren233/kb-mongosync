@@ -166,6 +166,14 @@ run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --mongosync-version abc deploy
 rc_is 1 "t41 malformed version rejected"; has "must look like X.Y" "t41 message"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" --image ghcr.io/x/y:t1 --mongosync-version 1.15.0 deploy
 rc_is 1 "t42 --image conflict rejected"; has "mutually exclusive" "t42 message"
+run "${CLEAN[@]}" "${FE[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" --src-ns s1 --src-cluster srccl --dst-ns s2 --dst-cluster dstcl --chart-dir "$PWD/charts/kb-mongosync" deploy
+rc_is 0 "t43a release ns falls back to source ns"
+grep -q -- "-n s1" "$FAKE/helm-args" && ok "t43a helm got -n s1" || bad "t43a helm ns missing"
+run "${CLEAN[@]}" "${FE[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" --source-uri "mongodb://u:p@a/" --dst-ns s2 --dst-cluster dstcl --chart-dir "$PWD/charts/kb-mongosync" deploy
+rc_is 0 "t43b uri source: release ns falls back to destination ns"
+grep -q -- "-n s2" "$FAKE/helm-args" && ok "t43b helm got -n s2" || bad "t43b helm ns missing"
+run "${CLEAN[@]}" "${FE[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" --source-uri "mongodb://u:p@a/" --destination-uri "mongodb://u:p@b/" --chart-dir "$PWD/charts/kb-mongosync" deploy
+rc_is 1 "t43c manual deploy without -n refused"; has "deploy needs --namespace" "t43c message"
 mkcluster srccl 8.0.5; mkcluster dstcl 8.0.5
 : >"$FAKE/execlog"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only

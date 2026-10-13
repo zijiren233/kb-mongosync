@@ -615,6 +615,7 @@ print(d["spec"]["componentSpecs"][0].get("serviceVersion",""))')"
 
 cmd_deploy() {
   local extra=() src_comp dst_comp
+  [ -n "$NAMESPACE" ] || die "deploy needs --namespace (manual mode has no cluster side to derive it from)"
   [ -n "$IMAGE" ] && [ -n "$MSYNC_VER" ] && die "--image and --mongosync-version are mutually exclusive"
   [ -n "$MSYNC_VER" ] && extra+=(--set-string "image.tag=mongosync-${MSYNC_VER}")
   [ -n "$IMAGE" ] && extra+=(--set-string "image.tag=${IMAGE##*:}")
