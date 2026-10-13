@@ -452,6 +452,15 @@ api_post() { # path body
     || die "POST $1 failed"
 }
 
+hsize() { # bytes -> human readable
+  python3 -c '
+import sys
+n=int(sys.argv[1]); u=["B","KiB","MiB","GiB","TiB"]
+i=0
+while n >= 1024 and i < 4: n/=1024.0; i+=1
+print(("%d%s" % (n, u[i])) if i == 0 else ("%.1f%s" % (n, u[i])))' "$1"
+}
+
 progress_field() { # field
   api_get_progress | python3 -c '
 import json,sys
@@ -784,32 +793,39 @@ if v: print("verification =", json.dumps(v)[:200])'
 
 cmd_wait() {
   pf_up
-  local deadline=$(( $(date +%s) + WAIT_TIMEOUT )) state lag ok
+  local deadline=$(( $(date +%s) + WAIT_TIMEOUT )) state lag cc ct cancom ok
+  local prev_c=0 prev_t=0
   info "waiting for: $WAIT_FOR (timeout ${WAIT_TIMEOUT}s)"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    state="$(progress_field state)"
-    lag="$(progress_field lagTimeSeconds)"
+    read -r state lag cc ct cancom <<<"$(api_get_progress | python3 -c '
+import json,sys
+p=json.load(sys.stdin)["progress"]; cc=(p.get("collectionCopy") or {})
+print(p.get("state",""), p.get("lagTimeSeconds","") if p.get("lagTimeSeconds") is not None else "",
+      cc.get("estimatedCopiedBytes") or 0, cc.get("estimatedTotalBytes") or 0, p.get("canCommit"))')"
     case "$WAIT_FOR" in
       copy)
-        # canCommit implies the copy phase finished; empty sources report a
-        # placeholder 0/1 bytes that never satisfies the byte comparison
-        ok="$(api_get_progress | python3 -c '
-import json,sys
-p=json.load(sys.stdin)["progress"]
-cc=p.get("collectionCopy") or {}
-t=cc.get("estimatedTotalBytes"); c=cc.get("estimatedCopiedBytes")
-done=(t and c and int(c)>=int(t)) or str(p.get("canCommit")).lower()=="true"
-print("yes" if done else "no")')"
-        [ "$ok" = "yes" ] && { info "collection copy complete"; return 0; } ;;
+        ok=no
+        { { [ "$ct" -gt 0 ] && [ "$cc" -ge "$ct" ]; } || [ "$cancom" = "True" ]; } && ok=yes
+        [ "$ok" = yes ] && { info "collection copy complete"; return 0; } ;;
       lag)
         [ -n "$lag" ] && [ "$lag" -le 1 ] 2>/dev/null && { info "lag=${lag}s"; return 0; } ;;
       can-commit)
-        [ "$(progress_field canCommit)" = "True" ] && { info "canCommit=true"; return 0; } ;;
+        [ "$cancom" = "True" ] && { info "canCommit=true"; return 0; } ;;
       committed)
         [ "$state" = "COMMITTED" ] && { info "state=COMMITTED"; return 0; } ;;
       *) die "unknown --for: $WAIT_FOR" ;;
     esac
-    info "  ... state=$state lag=${lag:-n/a}"
+    local speed=""
+    if [ "$prev_t" -gt 0 ] && [ "$ct" -gt 0 ] && [ "$cc" -gt "$prev_c" ] 2>/dev/null; then
+      local dt=$(( $(date +%s) - prev_t )) mbs eta
+      mbs=$(( (cc - prev_c) / dt / 1048576 ))
+      if [ "$mbs" -gt 0 ]; then
+        eta=$(( (ct - cc) / 1048576 / mbs ))
+        speed=" ${mbs}MiB/s eta $((eta / 60))m$((eta % 60))s"
+      fi
+    fi
+    prev_c="$cc"; prev_t=$(date +%s)
+    info "  ... state=$state lag=${lag:-n/a} copy=$(hsize "$cc")/$(hsize "$ct")${speed}"
     [ "$state" = "ERROR" ] && die "mongosync state=ERROR, aborting wait"
     sleep 10
   done
