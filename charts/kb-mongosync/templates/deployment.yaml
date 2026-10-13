@@ -58,6 +58,10 @@ spec:
               value: {{ .Values.verbosity | quote }}
             - name: KBMS_PORT
               value: {{ .Values.port | quote }}
+            {{- if .Values.disableVerification }}
+            - name: KBMS_DISABLE_VERIFICATION
+              value: "true"
+            {{- end }}
             {{- if .Values.source.uri }}
             - name: KBMS_SOURCE_URI
               valueFrom:

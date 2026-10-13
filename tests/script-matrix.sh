@@ -174,6 +174,14 @@ rc_is 0 "t43b uri source: release ns falls back to destination ns"
 grep -q -- "-n s2" "$FAKE/helm-args" && ok "t43b helm got -n s2" || bad "t43b helm ns missing"
 run "${CLEAN[@]}" "${FE[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" --source-uri "mongodb://u:p@a/" --destination-uri "mongodb://u:p@b/" --chart-dir "$PWD/charts/kb-mongosync" deploy
 rc_is 1 "t43c manual deploy without -n refused"; has "deploy needs --namespace" "t43c message"
+rm -f "$FAKE/helm-args"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" deploy --no-embedded-verify
+rc_is 0 "t44a deploy wires --no-embedded-verify"
+grep -q -- "--set disableVerification=true" "$FAKE/helm-args" && ok "t44a helm got disableVerification" || bad "t44a disableVerification missing"
+rm -f "$FAKE/helm-args"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${DEP[@]}" deploy
+rc_is 0 "t44b plain deploy leaves verification default"
+grep -q -- "disableVerification" "$FAKE/helm-args" && bad "t44b disableVerification unexpectedly set" || ok "t44b no disableVerification"
 mkcluster srccl 8.0.5; mkcluster dstcl 8.0.5
 : >"$FAKE/execlog"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only

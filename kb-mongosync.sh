@@ -620,6 +620,7 @@ cmd_deploy() {
   [ -n "$IMAGE" ] && [ -n "$MSYNC_VER" ] && die "--image and --mongosync-version are mutually exclusive"
   [ -n "$MSYNC_VER" ] && extra+=(--set-string "image.tag=mongosync-${MSYNC_VER}")
   [ -n "$IMAGE" ] && extra+=(--set-string "image.tag=${IMAGE##*:}")
+  [ "$NO_EVERIFY" = 1 ] && extra+=(--set disableVerification=true)
   [ -n "$CHART_VERSION" ] && [ -z "$CHART_DIR" ] && extra+=(--version "$CHART_VERSION")
   extra+=("${SETOPT[@]}")
 

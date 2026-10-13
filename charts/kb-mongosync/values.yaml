@@ -37,6 +37,9 @@ tolerations: []
 
 verbosity: INFO
 port: 27180
+# Wired from the driver flag --no-embedded-verify: passes --disableVerification
+# to mongosync so restarts and resumed syncs stay verification-free too.
+disableVerification: false
 
 resources:
   # mongosync memory scales with document size (copy buffers hold up to 10k

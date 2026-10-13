@@ -21,8 +21,13 @@ fi
 kb-mongosync render-conf > "$CONF"
 # mongosync tries to mkdir ./metrics in its working directory and spews WRN
 # lines when that fails; progress is consumed via the API, so disable file
-# metrics when the build supports the flag.
+# metrics when the build supports the flag. KBMS_DISABLE_VERIFICATION keeps
+# restarts/resumed syncs verification-free (matches --no-embedded-verify).
 MSFLAGS="--acceptDisclaimer"
 mongosync --help 2>&1 | grep -q -- --disableMetricsLogging \
   && MSFLAGS="$MSFLAGS --disableMetricsLogging"
+if [ "${KBMS_DISABLE_VERIFICATION:-}" = true ]; then
+  mongosync --help 2>&1 | grep -q -- --disableVerification \
+    && MSFLAGS="$MSFLAGS --disableVerification"
+fi
 exec mongosync --config "$CONF" $MSFLAGS
