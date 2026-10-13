@@ -39,7 +39,7 @@ rc_is 1 "t10 in-pod without any kubeconfig reaches API"; hasnt "kubeconfig not f
 run env -u KUBECONFIG HOME="$TMP/home" KBMS_SOURCE_URI=mongodb://u:p@a/ KBMS_DESTINATION_URI=mongodb://u:p@b/ "$S" render-conf
 rc_is 0 "t11 ambient default kubeconfig adopted silently"; has '"cluster0": "mongodb://u:p@a/"' "t11 config rendered"
 run env KUBECONFIG="$TMP/home/.kube/config" KBMS_SOURCE_URI=mongodb://u:p@a/ KBMS_DESTINATION_URI=mongodb://u:p@b/ "$S" render-conf
-rc_is 0 "t12 preset KUBECONFIG untouched (in-pod)"; has '"cluster1": "mongodb://u:p@b/"' "t12 config rendered"
+rc_is 0 "t12 preset KUBECONFIG untouched (in-pod)"; has '"cluster1": "mongodb://u:p@b/"' "t12 config rendered"; has "syncStartDelay.: 0" "t12 boot delay disabled"
 run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" status; rc_is 1 "t13 status without namespace"; has "need --namespace" "t13 message"
 
 echo "== context default namespace for cluster sides =="

@@ -670,7 +670,7 @@ cmd_render_conf() {
     dst_uri="$(build_uri "${KBMS_DESTINATION_NAMESPACE}" "${KBMS_DESTINATION_CLUSTER}" \
       "${KBMS_DESTINATION_COMPONENT:-$(discover_component "${KBMS_DESTINATION_NAMESPACE}" "${KBMS_DESTINATION_CLUSTER}")}")"
   fi
-  printf '{\n  "cluster0": "%s",\n  "cluster1": "%s",\n  "port": %s,\n  "verbosity": "%s",\n  "disableTelemetry": true\n}\n' \
+  printf '{\n  "cluster0": "%s",\n  "cluster1": "%s",\n  "port": %s,\n  "verbosity": "%s",\n  "disableTelemetry": true,\n  "syncStartDelay": 0\n}\n' \
     "$src_uri" "$dst_uri" "$port" "$verbosity"
 }
 
