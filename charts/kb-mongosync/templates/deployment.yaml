@@ -95,9 +95,7 @@ spec:
               containerPort: {{ .Values.port }}
           # mongosync binds its API to localhost only, so probes must exec
           # inside the container instead of using httpGet against the pod IP.
-          # Boot note: mongosync 1.16.0 sleeps a fixed 120s before serving
-          # (hidden syncStartDelay); newer builds serve in ~2s. The 2s period
-          # only trims detection latency after the API is actually up.
+          # mongosync 1.16.0 serves its API only after a fixed 120s boot sleep.
           readinessProbe:
             exec:
               command: ["/bin/sh", "-c", "curl -sf http://127.0.0.1:{{ .Values.port }}/api/v1/progress >/dev/null"]
