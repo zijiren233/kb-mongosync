@@ -95,7 +95,14 @@ case "$1" in
       *"isWritablePrimary"*) echo true ;;
       *"arbiterOnly"*) echo 0 ;;
       *"listCollections"*) : ;;
-      *"JSON.stringify"*) echo '{"bulk":{"collections":{"load0":{"count":100,"idx":1}}}}' ;;
+      *"JSON.stringify"*)
+        side=""; case "$args" in *srccl*) side=src ;; *dstcl*) side=dst ;; esac
+        if printf '%s' "$js" | grep -q countDocuments; then
+          if [ -f "${FAKE}/real-diff" ] && [ "$side" = dst ]; then echo '{"bulk":{"load0":101}}'
+          else echo '{"bulk":{"load0":100}}'; fi
+        elif [ -f "${FAKE}/est-drift" ] && [ "$side" = src ]; then
+          echo '{"bulk":{"collections":{"load0":{"count":105,"idx":1}}}}'
+        else echo '{"bulk":{"collections":{"load0":{"count":100,"idx":1}}}}'; fi ;;
       *"getDBNames"*)
         if [ -f "${FAKE}/dst-nonempty" ]; then printf 'otherdb\nmeta:\n'
         else printf '\nmeta:\n'; fi ;;
@@ -193,6 +200,14 @@ rc_is 0 "t46 full verify passes"; [ "$(grep -c dbHash "$FAKE/execlog")" -ge "1" 
 : >"$FAKE/execlog"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify >/dev/null 2>&1
 grep -q "countDocuments" "$FAKE/execlog" && ok "t46 exact counts in full mode" || bad "t46 full mode lost exact counts"
+touch "$FAKE/est-drift"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only
+rc_is 0 "t45a fastcount drift passes after exact recheck"; has "fastcount drift only" "t45a drift noted"
+rm -f "$FAKE/est-drift"
+touch "$FAKE/est-drift" "$FAKE/real-diff"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only
+rc_is 1 "t45b real count mismatch fails"; has "MISMATCH: db=bulk coll=load0" "t45b mismatch reported"; has "real count mismatch" "t45b reason"
+rm -f "$FAKE/est-drift" "$FAKE/real-diff"
 
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"

@@ -924,6 +924,68 @@ print("const only=" + json.dumps(["!" + a.split(",")[0].strip() for a in sys.arg
     print(JSON.stringify(out));'
   out6="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$js")"
   out8="$(mongosh_js "$DST_NS" "$dp" "$dst_comp" "$js")"
+  # counts-only: index/structure mismatches fail immediately; count-only
+  # mismatches are re-checked with exact counts on just those collections
+  # (estimatedDocumentCount fastcount can drift while the underlying data
+  # is identical)
+  if [ "$COUNTS_ONLY" = 1 ]; then
+    local soft="$KB_TMP/verify-soft" want xjs x6 x8
+    printf '%s\n%s\n' "$out6" "$out8" | python3 -c '
+import json,sys
+a=json.loads(sys.stdin.readline()); b=json.loads(sys.stdin.readline())
+soft=open(sys.argv[1],"w"); hard=False
+for name in sorted(set(a)|set(b)):
+    ca=(a.get(name) or {}).get("collections") or {}
+    cb=(b.get(name) or {}).get("collections") or {}
+    for c in sorted(set(ca)|set(cb)):
+        va, vb = ca.get(c), cb.get(c)
+        if va is None or vb is None or va.get("idx") != vb.get("idx"):
+            print("MISMATCH: db=%s coll=%s" % (name, c))
+            print("  src:", json.dumps(va)); print("  dst:", json.dumps(vb)); hard=True
+        elif va.get("count") != vb.get("count"):
+            soft.write("%s\t%s\n" % (name, c))
+sys.exit(3 if hard else 0)' "$soft" 2>/dev/null
+    case $? in
+      0) : ;;
+      3) die "verify failed (structure or index mismatch)" ;;
+      *) die "failed to parse verify output" ;;
+    esac
+    if [ -s "$soft" ]; then
+      warn "$(wc -l <"$soft" | tr -d " ") collection(s) differ in estimated counts; re-checking exactly"
+      want="$(python3 -c '
+import json,sys,collections
+d=collections.defaultdict(list)
+for line in open(sys.argv[1]):
+    db, coll = line.rstrip("\n").split("\t", 1)
+    d[db].append(coll)
+print(json.dumps(d))' "$soft")"
+      xjs='
+    const want = '"$want"';
+    const out = {};
+    for (const [dn, cols] of Object.entries(want)) {
+      const d = db.getSiblingDB(dn); out[dn] = {};
+      for (const c of cols) out[dn][c] = d[c].countDocuments({});
+    }
+    print(JSON.stringify(out));'
+      x6="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$xjs")"
+      x8="$(mongosh_js "$DST_NS" "$dp" "$dst_comp" "$xjs")"
+      printf '%s\n%s\n' "$x6" "$x8" | python3 -c '
+import json,sys
+a=json.loads(sys.stdin.readline()); b=json.loads(sys.stdin.readline())
+bad=False
+for db in sorted(set(a)|set(b)):
+    for c in sorted(set(a.get(db) or {})|set(b.get(db) or {})):
+        va=(a.get(db) or {}).get(c); vb=(b.get(db) or {}).get(c)
+        if va != vb:
+            print("MISMATCH: db=%s coll=%s src=%s dst=%s (exact)" % (db, c, va, vb)); bad=True
+if bad: sys.exit(1)
+print("fastcount drift only: exact counts are equal")' || die "verify failed (real count mismatch)"
+      info "verify passed (counts only; estimate drift confirmed equal by exact counts)"
+      return 0
+    fi
+    info "verify passed (counts only)"
+    return 0
+  fi
   printf '%s\n%s\n' "$out6" "$out8" | python3 -c '
 import json,sys
 a=json.loads(sys.stdin.readline()); b=json.loads(sys.stdin.readline())
@@ -936,7 +998,7 @@ for name in sorted(set(a)|set(b)):
         ok=False
 print("verify:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)' || die "verify failed"
-  [ "$COUNTS_ONLY" = 1 ] && info "verify passed (counts only)" || info "verify passed"
+  info "verify passed"
 }
 
 oplog_user_ts() { # ns pod comp -> stable string for the last real user oplog entry
