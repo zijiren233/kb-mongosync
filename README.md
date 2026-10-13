@@ -4,7 +4,7 @@ Migrate MongoDB clusters with [mongosync](https://www.mongodb.com/docs/mongosync
 
 ## Quick start (serviceAccount mode)
 
-Connection strings, replica set names and credentials are discovered in-pod via the chart's ServiceAccount. Cluster sides without an explicit `--src-ns`/`--dst-ns` use the kubeconfig context's namespace. From the laptop:
+Connection strings, replica set names and credentials are discovered in-pod via the chart's ServiceAccount. Cluster sides without an explicit `--src-ns`/`--dst-ns` use `-n`/`--namespace` when given, else the kubeconfig context's namespace. From the laptop:
 
 ```bash
 ./kb-mongosync.sh --src-cluster <src> --dst-cluster <dst> run

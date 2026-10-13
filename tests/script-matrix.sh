@@ -63,6 +63,8 @@ rc_is 0 "t33 ns-less cluster sides adopt context ns"; has "in ctx-ns" "t33 ns us
 sed "s/, namespace: ctx-ns//" "$TMP/ctxns/config" > "$TMP/ctxns/no-ns"
 run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/ctxns/no-ns" --src-cluster a --dst-cluster b rbac
 rc_is 0 "t34 context without ns falls back to default"; has "in default" "t34 fallback ns"
+run "${CLEAN[@]}" "$S" --kubeconfig "$TMP/ctxns/config" -n cli-ns --src-cluster a --dst-cluster b rbac
+rc_is 0 "t34a -n overrides the context ns"; has "in cli-ns" "t34a release ns used"
 
 echo "== check version gating via fake kubectl =="
 mkdir -p "$TMP/fakebin" "$TMP/fake"
@@ -71,6 +73,7 @@ cat >"$TMP/fakebin/kubectl" <<'KEOF'
 FAKE="${FAKE_DIR:?}"
 stdin_data="$(cat 2>/dev/null || true)"
 args="$*"
+printf '%s\n' "$args" >> "${FAKE}/kcalls"
 case "$1" in
   get)
     case "$2" in
@@ -128,6 +131,19 @@ rm -f "$FAKE/ver-fail"
 mkcluster srccl 6.0.20
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" check
 rc_is 0 "t38 compliant versions pass"; has "check passed" "t38 passed"
+rm -f "$FAKE/kcalls"
+run "${CLEAN[@]}" "${FE[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" -n n2 --src-cluster srccl --dst-cluster dstcl check
+rc_is 0 "t38a ns-less cluster sides adopt -n"
+OUT="$(grep "cluster srccl" "$FAKE/kcalls")"
+has "get cluster srccl -n n2" "t38a source looked up in n2"
+OUT="$(grep "cluster dstcl" "$FAKE/kcalls")"
+has "get cluster dstcl -n n2" "t38a destination looked up in n2"
+run "${CLEAN[@]}" "${FE[@]}" "$S" --kubeconfig "$TMP/home/.kube/config" -n n2 --src-ns n --src-cluster srccl --dst-cluster dstcl check
+rc_is 0 "t38b explicit --src-ns beats -n"
+OUT="$(grep "cluster srccl" "$FAKE/kcalls")"
+has "get cluster srccl -n n -o" "t38b source keeps explicit ns"
+OUT="$(grep "cluster dstcl" "$FAKE/kcalls")"
+has "get cluster dstcl -n n2" "t38b destination still adopts -n"
 mkcluster srccl 6.0.20
 
 echo "== deploy mongosync version selection =="

@@ -75,8 +75,9 @@ kb-mongosync: migrate MongoDB clusters via mongosync (Helm-deployed)
 
 Input sides (each side independently, mixing is allowed):
   cluster side:  --src-cluster NAME [--src-ns NS]   (same for --dst-*)
-                 namespace defaults to the kubeconfig context's namespace;
-                 connection strings are discovered from KubeBlocks via kubectl
+                 namespace defaults to --namespace, then the kubeconfig
+                 context's; connection strings are discovered from
+                 KubeBlocks via kubectl
   static side:   --source-uri URI / --destination-uri URI
                  no kubectl discovery for that side
   both static = manual mode; both cluster = auto mode; one of each = hybrid
@@ -85,8 +86,9 @@ Input sides (each side independently, mixing is allowed):
 Options:
   --kubeconfig PATH       kubeconfig for kubectl/helm (default $KUBECONFIG)
   --context NAME          context to select from the kubeconfig
-  --namespace NS          release namespace (default: the source namespace,
-                          which itself defaults to the kubeconfig context)
+  --namespace NS          release namespace; also the default for cluster
+                          sides missing --src-ns/--dst-ns (release default:
+                          the source namespace)
   --release NAME          helm release name (default msync-<src>-to-<dst>, or msync-manual)
   --chart URI             chart reference (default oci://ghcr.io/zijiren233/kb-mongosync-chart/kb-mongosync)
   --chart-version V       chart version (defaults to latest)
@@ -213,11 +215,12 @@ ctx_ns() {
   kubectl ${args[@]+"${args[@]}"} config view --minify -o jsonpath='{..namespace}' 2>/dev/null | head -n1
 }
 
-# a cluster side given without --src-ns/--dst-ns uses the kubeconfig
-# context's default namespace, matching kubectl's own behavior (applies to
-# every subcommand, including the API-driving ones that locate the release)
+# a cluster side given without --src-ns/--dst-ns defaults to --namespace
+# when present, else the kubeconfig context's namespace, matching kubectl's
+# own behavior (applies to every subcommand, including the API-driving ones
+# that locate the release)
 if { [ -n "$SRC_CLUSTER" ] && [ -z "$SRC_NS" ]; } || { [ -n "$DST_CLUSTER" ] && [ -z "$DST_NS" ]; }; then
-  DEF_NS="$(ctx_ns)"
+  DEF_NS="${NAMESPACE:-$(ctx_ns)}"
   : "${DEF_NS:=default}"
   [ -n "$SRC_NS" ] || SRC_NS="$DEF_NS"
   [ -n "$DST_NS" ] || DST_NS="$DEF_NS"
