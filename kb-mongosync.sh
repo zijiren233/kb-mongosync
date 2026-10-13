@@ -59,6 +59,7 @@ FORCE=0
 WB_OFF=0
 INSPECT_DST=0
 COUNTS_ONLY=0
+EXACT=0
 NO_EVERIFY=0
 INCLUDE_NS=()
 EXCLUDE_NS=()
@@ -105,7 +106,11 @@ Options:
   --yes                   assume yes (required in non-interactive sessions)
     --force                 allow commit even if the source is not quiet
     --counts-only           verify compares document counts only (seconds at
-                            any size; skips the dbHash full read)
+                            any size; skips the dbHash full read; estimated
+                            counts can drift under writes or after unclean
+                            shutdowns)
+    --exact                 with --counts-only: scan for exact counts (slow,
+                            proportional to document count)
     --no-embedded-verify    start with the embedded verifier off (correctness
                             then relies on your own verification; useful for
                             very large document counts)
@@ -189,6 +194,7 @@ while [ $# -gt 0 ]; do
     --yes|-y)        ASSUME_YES=1; shift ;;
     --force)         FORCE=1; shift ;;
     --counts-only)   COUNTS_ONLY=1; shift ;;
+    --exact)         EXACT=1; shift ;;
     --no-embedded-verify) NO_EVERIFY=1; shift ;;
     --include-ns)   need_value "$@"; INCLUDE_NS+=("$2"); shift 2 ;;
     --exclude-ns)   need_value "$@"; EXCLUDE_NS+=("$2"); shift 2 ;;
@@ -895,7 +901,12 @@ EOF
   local hashpart=""
   [ "$COUNTS_ONLY" = 1 ] || hashpart='hash: d.runCommand({dbHash: 1, collections: cols}).md5, '
   local countcmd="d[c].countDocuments({})"
-  [ "$COUNTS_ONLY" = 1 ] && countcmd="d[c].estimatedDocumentCount()"
+  if [ "$COUNTS_ONLY" = 1 ]; then
+    countcmd="d[c].estimatedDocumentCount()"
+    [ "$EXACT" = 1 ] && countcmd="d[c].countDocuments({})"
+  elif [ "$EXACT" = 1 ]; then
+    die "--exact applies to --counts-only (full verify already counts exactly)"
+  fi
   local dbfilter=""
   if [ ${#INCLUDE_NS[@]} -gt 0 ]; then
     dbfilter="$(python3 -c '
@@ -924,10 +935,10 @@ print("const only=" + json.dumps(["!" + a.split(",")[0].strip() for a in sys.arg
     print(JSON.stringify(out));'
   out6="$(mongosh_js "$SRC_NS" "$sp" "$src_comp" "$js")"
   out8="$(mongosh_js "$DST_NS" "$dp" "$dst_comp" "$js")"
-  # counts-only: estimated counts only, never a document scan; full mode
-  # additionally hashes every document on both sides
+  # counts-only: metadata counts (exact with --exact); full mode additionally
+  # hashes every document on both sides
   if [ "$COUNTS_ONLY" = 1 ]; then
-    printf '%s\n%s\n' "$out6" "$out8" | python3 -c '
+    if ! printf '%s\n%s\n' "$out6" "$out8" | python3 -c '
 import json,sys
 a=json.loads(sys.stdin.readline()); b=json.loads(sys.stdin.readline())
 ok=True
@@ -940,8 +951,13 @@ for name in sorted(set(a)|set(b)):
             print("MISMATCH: db=%s coll=%s src=%s dst=%s" % (name, c, json.dumps(va), json.dumps(vb)))
             ok=False
 print("verify:", "PASS" if ok else "FAIL")
-sys.exit(0 if ok else 1)' || die "verify failed (counts differ; estimated counts can drift under writes or fastcount skew)"
-    info "verify passed (counts only)"
+sys.exit(0 if ok else 1)'; then
+      if [ "$EXACT" = 1 ]; then
+        die "verify failed (exact counts differ)"
+      fi
+      die "verify failed (counts differ). With estimated counts this can be writers still active, the app already on the destination, or fastcount drift after unclean shutdowns; re-run with --exact to confirm"
+    fi
+    [ "$EXACT" = 1 ] && info "verify passed (counts only, exact)" || info "verify passed (counts only)"
     return 0
   fi
   printf '%s\n%s\n' "$out6" "$out8" | python3 -c '

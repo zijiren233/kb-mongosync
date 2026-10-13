@@ -98,8 +98,8 @@ case "$1" in
       *"JSON.stringify"*)
         side=""; case "$args" in *srccl*) side=src ;; *dstcl*) side=dst ;; esac
         if printf '%s' "$js" | grep -q countDocuments; then
-          if [ -f "${FAKE}/real-diff" ] && [ "$side" = dst ]; then echo '{"bulk":{"load0":101}}'
-          else echo '{"bulk":{"load0":100}}'; fi
+          if [ -f "${FAKE}/real-diff" ] && [ "$side" = dst ]; then echo '{"bulk":{"collections":{"load0":{"count":101,"idx":1}}}}'
+          else echo '{"bulk":{"collections":{"load0":{"count":100,"idx":1}}}}'; fi
         elif [ -f "${FAKE}/est-drift" ] && [ "$side" = src ]; then
           echo '{"bulk":{"collections":{"load0":{"count":105,"idx":1}}}}'
         else echo '{"bulk":{"collections":{"load0":{"count":100,"idx":1}}}}'; fi ;;
@@ -202,8 +202,17 @@ run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify >/dev/null 2>&1
 grep -q "countDocuments" "$FAKE/execlog" && ok "t46 exact counts in full mode" || bad "t46 full mode lost exact counts"
 touch "$FAKE/est-drift"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only
-rc_is 1 "t45a estimate mismatch fails without rescans"; has "MISMATCH: db=bulk coll=load0" "t45a per-collection mismatch"; hasnt "countDocuments" "t45a no exact rescan issued"
-rm -f "$FAKE/est-drift"
+rc_is 1 "t45a estimate mismatch fails without rescans"; has "MISMATCH: db=bulk coll=load0" "t45a per-collection mismatch"; has "re-run with --exact" "t45a hint given"
+: >"$FAKE/execlog"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only --exact
+rc_is 0 "t45b --exact confirms drift as equal"; has "counts only, exact" "t45b exact mode noted"
+grep -q "countDocuments" "$FAKE/execlog" && ok "t45b exact counts issued" || bad "t45b exact counts missing"
+touch "$FAKE/real-diff"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only --exact
+rc_is 1 "t45c exact mismatch fails"; has "exact counts differ" "t45c reason"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --exact
+rc_is 1 "t45d --exact without --counts-only refused"; has "exact applies to" "t45d message"
+rm -f "$FAKE/est-drift" "$FAKE/real-diff"
 
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"
