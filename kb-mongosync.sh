@@ -447,7 +447,23 @@ api_get_progress() {
     fi
     [ "$i" -lt 3 ] && { warn "GET /api/v1/progress attempt $i failed; retrying"; sleep 3; }
   done
-  die "GET /api/v1/progress failed"
+  # a tunnel we own can go stale mid-run (pod restart, network flap): tear it
+  # down and re-establish once before giving up
+  if [ -n "$PF_PID" ]; then
+    warn "progress unreachable; re-establishing port-forward"
+    kill "$PF_PID" 2>/dev/null || true
+    PF_PID=""; API_BASE=""
+    pf_up
+    for i in 1 2 3; do
+      if body="$(curl -s --max-time 15 "${API_BASE}/api/v1/progress")"; then
+        printf '%s' "$body"
+        return 0
+      fi
+      sleep 3
+    done
+  fi
+  warn "GET /api/v1/progress failed"
+  return 1
 }
 
 api_post() { # path body
@@ -803,11 +819,17 @@ cmd_wait() {
   local prev_c=0 prev_t=0
   info "waiting for: $WAIT_FOR (timeout ${WAIT_TIMEOUT}s)"
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    read -r state lag cc ct cancom <<<"$(api_get_progress | python3 -c '
+    if ! body="$(api_get_progress)"; then
+      warn "progress unavailable; retrying"
+      sleep 10
+      continue
+    fi
+    read -r state lag cc ct cancom <<<"$(printf '%s' "$body" | python3 -c '
 import json,sys
 p=json.load(sys.stdin)["progress"]; cc=(p.get("collectionCopy") or {})
 print(p.get("state",""), p.get("lagTimeSeconds","") if p.get("lagTimeSeconds") is not None else "",
-      cc.get("estimatedCopiedBytes") or 0, cc.get("estimatedTotalBytes") or 0, p.get("canCommit"))')"
+      cc.get("estimatedCopiedBytes") or 0, cc.get("estimatedTotalBytes") or 0, p.get("canCommit"))' 2>/dev/null)"
+    cc="${cc:-0}"; ct="${ct:-0}"
     case "$WAIT_FOR" in
       copy)
         ok=no
