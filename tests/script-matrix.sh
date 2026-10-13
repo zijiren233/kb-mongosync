@@ -187,8 +187,12 @@ mkcluster srccl 8.0.5; mkcluster dstcl 8.0.5
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify --counts-only
 rc_is 0 "t45 verify --counts-only passes"; has "counts only" "t45 mode noted"
 [ "$(grep -c dbHash "$FAKE/execlog")" = "0" ] && ok "t45 no dbHash issued" || bad "t45 dbHash was issued"
+grep -q "estimatedDocumentCount" "$FAKE/execlog" && ok "t45 counts are metadata reads" || bad "t45 counts not metadata reads"
 run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify
 rc_is 0 "t46 full verify passes"; [ "$(grep -c dbHash "$FAKE/execlog")" -ge "1" ] && ok "t46 dbHash issued once per side" || bad "t46 dbHash missing"
+: >"$FAKE/execlog"
+run "${CLEAN[@]}" "${FE[@]}" "$S" "${CK[@]}" verify >/dev/null 2>&1
+grep -q "countDocuments" "$FAKE/execlog" && ok "t46 exact counts in full mode" || bad "t46 full mode lost exact counts"
 
 echo "== render-conf env matrix =="
 run "${CLEAN[@]}" "$S" render-conf;                rc_is 1 "t14 no env"; has "no KBMS.* configuration" "t14 message"
@@ -329,6 +333,8 @@ rm -f "$FAKE/dst-nonempty"
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for bogus; rc_is 1 "m9 unknown --for"; has "unknown --for" "m9 message"
 mock_state '{"state":"RUNNING","canCommit":false,"lagTimeSeconds":5}'
 run "${CLEAN[@]}" "$S" "${API[@]}" wait --for lag --timeout 1; rc_is 1 "m10 wait timeout"; has "timed out waiting for lag" "m10 message"
+run "${CLEAN[@]}" "$S" --api-url http://127.0.0.1:1 wait --for copy --timeout 3
+rc_is 1 "m10a unreachable API: wait degrades to timeout"; has "progress unavailable" "m10a clean retry line"; has "timed out waiting for copy" "m10a timeout message"; hasnt "Traceback" "m10a no traceback noise"
 mock_state '{"state":"RUNNING","canCommit":true,"lagTimeSeconds":20}'
 : >"$TMP/posts"
 run "${CLEAN[@]}" "$S" "${API[@]}" commit --yes; rc_is 1 "m11 manual mode: nonzero lag refused"; has "static-source mode cannot prove quiescence" "m11 message"

@@ -882,11 +882,14 @@ EOF
   dp="$(find_primary_pod "$DST_NS" "$DST_CLUSTER" "$dst_comp" || true)"
   [ -n "$sp" ] || die "no primary pod on source"
   [ -n "$dp" ] || die "no primary pod on destination"
-  # counts-only mode reads collection metadata (fast at any size); the full
-  # mode additionally hashes every document on both sides; with a namespace
-  # filter only the filtered databases are compared
+  # counts-only mode reads collection metadata (estimatedDocumentCount is a
+  # WiredTiger metadata read, O(1) per collection); the full mode scans every
+  # document per collection (countDocuments) and additionally hashes both
+  # sides; with a namespace filter only the filtered databases are compared
   local hashpart=""
   [ "$COUNTS_ONLY" = 1 ] || hashpart='hash: d.runCommand({dbHash: 1, collections: cols}).md5, '
+  local countcmd="d[c].countDocuments({})"
+  [ "$COUNTS_ONLY" = 1 ] && countcmd="d[c].estimatedDocumentCount()"
   local dbfilter=""
   if [ ${#INCLUDE_NS[@]} -gt 0 ]; then
     dbfilter="$(python3 -c '
@@ -909,7 +912,7 @@ print("const only=" + json.dumps(["!" + a.split(",")[0].strip() for a in sys.arg
       const cols = d.getCollectionNames().filter(c => !c.startsWith("system."));
       out[dbName] = {'"$hashpart"'collections: {}};
       for (const c of cols.sort()) {
-        out[dbName].collections[c] = {count: d[c].countDocuments({}), idx: d[c].getIndexes().length};
+        out[dbName].collections[c] = {count: '"$countcmd"', idx: d[c].getIndexes().length};
       }
     }
     print(JSON.stringify(out));'
